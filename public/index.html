@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Phòng Support</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="top">
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true"></span>
+      <h1>Phòng Support</h1>
+      <span class="clock" id="clock">--:--</span>
+    </div>
+    <div class="stats">
+      <span class="stat"><span class="stat-label">Hôm nay</span><b id="st-today">—</b></span>
+      <span class="stat"><span class="stat-label">7 ngày</span><b id="st-week">—</b></span>
+      <span class="stat"><span class="stat-label">Task đã log</span><b id="st-tasks">—</b></span>
+    </div>
+    <div class="actions">
+      <span class="pill" id="boss-pill"><span class="dot"></span><span id="boss-text">Đang kết nối…</span></span>
+      <span id="machines" class="machines"></span>
+      <button type="button" id="btn-poll">Làm mới BOSS</button>
+      <button type="button" id="btn-notify">Bật thông báo</button>
+    </div>
+  </header>
+
+  <main class="layout">
+    <aside class="panel sessions">
+      <div class="panel-head">
+        <h2>Phiên Claude Code</h2>
+        <p class="muted" id="sess-summary">Chưa có phiên nào gửi sự kiện.</p>
+      </div>
+      <div class="counts">
+        <div class="count c-wait"><b id="n-wait">0</b><span>chờ duyệt</span></div>
+        <div class="count c-work"><b id="n-work">0</b><span>đang làm</span></div>
+        <div class="count c-idle"><b id="n-idle">0</b><span>đang nghỉ</span></div>
+      </div>
+      <div id="sess-list" class="sess-list"></div>
+      <p class="muted hint" id="sess-hint">Mở một phiên Claude Code sau khi đã cài hooks để thấy nó ở đây.</p>
+    </aside>
+
+    <section class="center">
+      <div class="seg tabs" role="tablist" aria-label="Chế độ xem">
+        <button type="button" role="tab" id="tab-office" aria-selected="true" aria-pressed="true" data-view="office">Văn phòng</button>
+        <button type="button" role="tab" id="tab-list" aria-selected="false" aria-pressed="false" data-view="list">Danh sách task</button>
+      </div>
+
+      <div class="office-wrap" id="view-office">
+        <canvas id="office" aria-label="Văn phòng: mỗi người là một phiên Claude Code, khách xếp hàng là task BOSS ở trạng thái Todo"></canvas>
+        <div class="office-toolbar" role="toolbar" aria-label="Điều khiển văn phòng">
+          <button type="button" id="oz-fit" title="Vừa khung" aria-label="Vừa khung">
+            <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 9.5 10 3.5l7 6V17H12v-4.5H8V17H3z"/></svg>
+          </button>
+          <span class="tb-sep"></span>
+          <button type="button" id="oz-out" title="Thu nhỏ" aria-label="Thu nhỏ"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4.5 10h11"/></svg></button>
+          <span class="tb-zoom" id="oz-level">100%</span>
+          <button type="button" id="oz-in" title="Phóng to" aria-label="Phóng to"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4.5 10h11M10 4.5v11"/></svg></button>
+          <span class="tb-sep"></span>
+          <button type="button" id="btn-full" title="Toàn màn hình" aria-label="Toàn màn hình">
+            <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3.5 8V3.5H8M12 3.5h4.5V8M16.5 12v4.5H12M8 16.5H3.5V12"/></svg>
+          </button>
+          <button type="button" id="oz-shot" title="Chụp ảnh văn phòng" aria-label="Chụp ảnh văn phòng">
+            <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 6.5h3l1.5-2h5l1.5 2h3v9.5H3z"/><circle cx="10" cy="11" r="3"/></svg>
+          </button>
+        </div>
+        <div class="office-legend">
+          <span><i class="lg working"></i>Đang làm</span>
+          <span><i class="lg waiting"></i>Chờ duyệt</span>
+          <span><i class="lg idle"></i>Phòng nghỉ = xong lượt, chờ bạn</span>
+          <span><i class="lg queue"></i>Khách xếp hàng = task Todo</span>
+          <span class="hint-drag">Kéo để di chuyển · cuộn để phóng to</span>
+        </div>
+        <div class="popover" id="popover" hidden></div>
+      </div>
+
+      <div id="view-list" hidden>
+      <div class="toolbar">
+        <input type="search" id="q" placeholder="Tìm mã task, tiêu đề, người xử lý…" aria-label="Tìm task">
+      </div>
+
+      <div class="desks">
+        <div class="desk" data-app="Solution">
+          <div class="desk-head"><span class="desk-dot"></span><h2>B2B Solution</h2><b class="desk-n">0</b><span class="desk-urgent"></span></div>
+          <div class="desk-list"></div>
+        </div>
+        <div class="desk" data-app="Quote">
+          <div class="desk-head"><span class="desk-dot"></span><h2>B2B Quote</h2><b class="desk-n">0</b><span class="desk-urgent"></span></div>
+          <div class="desk-list"></div>
+        </div>
+        <div class="desk" data-app="Lock">
+          <div class="desk-head"><span class="desk-dot"></span><h2>B2B Lock</h2><b class="desk-n">0</b><span class="desk-urgent"></span></div>
+          <div class="desk-list"></div>
+        </div>
+      </div>
+      </div>
+
+      <div class="panel mine" id="assigned-panel">
+        <div class="panel-head row">
+          <h2>Giao cho tôi</h2>
+          <p class="muted" id="assigned-note"></p>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Task</th><th>Tiêu đề</th><th>App</th><th>Trạng thái</th><th>Hạn</th></tr></thead>
+            <tbody id="assigned-rows"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="panel mine">
+        <div class="panel-head row">
+          <h2>Việc tôi đã log gần đây</h2>
+          <p class="muted" id="mine-note"></p>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Task</th><th>Tiêu đề</th><th>Trạng thái</th><th class="num">Phút</th><th>Lần cuối</th></tr></thead>
+            <tbody id="mine-rows"></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <aside class="panel feed">
+      <div class="panel-head">
+        <h2>Hoạt động</h2>
+        <div class="seg small" role="group" aria-label="Lọc hoạt động" id="feed-filter">
+          <button type="button" data-feed="all" aria-pressed="true">Tất cả</button>
+          <button type="button" data-feed="attention" aria-pressed="false">Cần chú ý <span id="n-attn" class="badge" hidden>0</span></button>
+          <button type="button" data-feed="claude" aria-pressed="false">Claude</button>
+          <button type="button" data-feed="boss" aria-pressed="false">BOSS</button>
+        </div>
+      </div>
+      <ol id="feed-list" class="feed-list"></ol>
+    </aside>
+  </main>
+
+  <div class="toasts" id="toasts" aria-live="polite"></div>
+
+  <script src="/app.js" type="module"></script>
+</body>
+</html>

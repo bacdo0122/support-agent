@@ -1,0 +1,15 @@
+{
+  "name": "support-office",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Local dashboard: BOSS Help Desk queue for Solution / Quote / Lock plus live Claude Code sessions via hooks",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "start": "node --env-file-if-exists=.env server.mjs",
+    "dev": "node --watch --env-file-if-exists=.env server.mjs",
+    "test": "node --test"
+  }
+}
