@@ -201,3 +201,33 @@ td.overdue { color: var(--red); font-weight: 600; }
 .item-detail { font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
 @keyframes fresh { from { background: color-mix(in srgb, var(--amber) 18%, var(--panel-2)); } }
 @media (prefers-reduced-motion: reduce) { .item.fresh { animation: none; } }
+
+/* approval queue */
+.approvals { margin-bottom: 16px; border-color: color-mix(in srgb, var(--amber) 45%, var(--line)); }
+.appr-list { display: grid; gap: 10px; }
+.appr { background: var(--panel-2); border: 1px solid var(--line); border-left: 4px solid var(--muted); border-radius: 8px; padding: 10px 12px; display: grid; gap: 6px; min-width: 0; }
+.appr.pending, .appr.review { border-left-color: var(--amber); }
+.appr.analyzing, .appr.queued { border-left-color: var(--blue); }
+.appr.failed { border-left-color: var(--red); }
+.appr-state { font-size: 12px; font-weight: 600; color: var(--muted); }
+.appr-state.s-pending, .appr-state.s-review { color: var(--amber); }
+.appr-state.s-analyzing, .appr-state.s-queued { color: var(--blue); }
+.appr-state.s-analyzing::after { content: ''; display: inline-block; width: 8px; height: 8px; margin-left: 6px; border-radius: 50%; background: var(--blue); animation: appr-pulse 1.2s ease-in-out infinite; }
+@keyframes appr-pulse { 50% { opacity: .2; } }
+.appr-sec { font-size: 13px; overflow-wrap: anywhere; }
+.appr-sec b { color: var(--muted); font-weight: 600; }
+.appr-block { border-top: 1px dashed var(--line); padding-top: 8px; display: grid; gap: 6px; }
+.appr-block-head { font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
+.appr-text { width: 100%; background: var(--bg); color: var(--fg); border: 1px solid var(--line); border-radius: 6px; padding: 8px; font: 13px/1.5 var(--font); resize: vertical; }
+.appr-text.mono, .appr-pre, .appr-report pre { font: 12px/1.5 var(--mono); }
+.appr-pre, .appr-report pre { white-space: pre-wrap; overflow-wrap: anywhere; background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 8px; margin: 0; max-height: 420px; overflow: auto; }
+.appr-report summary { cursor: pointer; font-size: 12px; color: var(--muted); }
+.appr-report[open] summary { margin-bottom: 6px; }
+.appr-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.appr-actions button, .toast-actions button, td button.small { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 5px 12px; }
+.appr-actions button.primary, .toast-actions button.primary { background: var(--amber); border-color: var(--amber); color: #1a1408; font-weight: 600; }
+.appr-actions button:disabled, td button:disabled { opacity: .5; cursor: progress; }
+td button.small { font-size: 12px; padding: 2px 8px; }
+.appr-err { color: var(--red); font-size: 12px; overflow-wrap: anywhere; }
+.appr-ok { color: var(--green); font-size: 12px; }
+.pop-go { margin-top: 8px; width: 100%; background: var(--amber); border: 0; border-radius: 6px; padding: 5px 10px; color: #1a1408; font-weight: 600; font-size: 12px; }

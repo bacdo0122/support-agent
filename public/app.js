@@ -255,6 +255,12 @@ function showPopover(s, at) {
   row('Yêu cầu', s.prompt);
   row('Thư mục', s.cwd);
   row('Cập nhật', ago(s.updatedAt) + ' trước');
+  if (s.agent) {
+    const go = el('button', 'pop-go', 'Xem trong hàng đợi');
+    go.type = 'button';
+    go.addEventListener('click', () => document.getElementById(`appr-${s.task}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' }));
+    popover.append(go);
+  }
   popover.hidden = false;
   const wrap = popover.parentElement.getBoundingClientRect();
   const w = popover.offsetWidth;
@@ -277,11 +283,47 @@ $('#oz-shot').addEventListener('click', () => {
   a.click();
 });
 
+// One agent per approval-queue task on this machine, in the room of the task's app; it leaves when the task is done or skipped.
+const APP_ROOMS = ['Solution', 'Quote', 'Lock'];
+function pipelineAgents() {
+  const agents = [];
+  for (const it of localPipeline()) {
+    if (['done', 'skipped'].includes(it.state)) continue;
+    let status = 'working';
+    let lastAction = '';
+    let waitingFor = '';
+    if (it.state === 'pending') [status, waitingFor] = ['waiting', it.note ? 'task không còn Todo, duyệt để phân tích' : 'duyệt phân tích'];
+    else if (it.state === 'queued') lastAction = it.bossStatus?.state === 'moving' ? 'Chuyển status sang In Progress' : 'Chờ lượt phân tích';
+    else if (it.state === 'analyzing') lastAction = 'Đang chạy /analyze-boss-task';
+    else if (it.state === 'failed') [status, waitingFor] = ['waiting', `lỗi: ${it.error ?? ''}`];
+    else if (it.comment?.state === 'posting') lastAction = 'Đang comment lên task';
+    else if (it.devhub?.state === 'running') lastAction = 'Đang ghi DevHub';
+    else [status, waitingFor] = ['waiting', 'duyệt solution'];
+    const app = APP_ROOMS.includes(it.app) ? it.app : APP_ROOMS.includes(it.analysis?.app) ? it.analysis.app : 'Chung';
+    agents.push({
+      id: `agent-${it.key}`, key: `agent|${it.key}`, agent: true, project: `Agent #${it.key.split('-').pop()}`, task: it.key, app,
+      status, lastAction, waitingFor, prompt: it.title, skill: 'analyze-boss-task', cwd: '', machine: '', subagents: 0, updatedAt: it.updatedAt,
+    });
+  }
+  return agents;
+}
+
 function renderOffice() {
-  office.update({ sessions: allSessions(), tasks: boss()?.tasks ?? [] });
+  const agents = pipelineAgents();
+  const byTask = new Map(agents.map((a) => [a.task, a]));
+  // a Claude session reporting through hooks for the same task is that agent: show its live action, not a second person
+  const sessions = [];
+  for (const s of allSessions()) {
+    const a = byTask.get(s.task);
+    if (a && s.status !== 'ended') {
+      if (a.status === 'working' && s.lastAction) a.lastAction = s.lastAction;
+    } else sessions.push(s);
+  }
+  office.update({ sessions: [...sessions, ...agents], tasks: boss()?.tasks ?? [] });
   if (popKey) {
     const s = allSessions().find((x) => x.key === popKey);
-    if (!s || s.status === 'ended') showPopover(null);
+    if (!s && !pipelineAgents().some((x) => x.key === popKey)) showPopover(null);
+    else if (s?.status === 'ended') showPopover(null);
   }
 }
 
@@ -291,6 +333,7 @@ function renderAll() {
   renderDesks();
   renderMine();
   renderAssigned();
+  renderApprovals();
   renderFeed();
   renderOffice();
 }
@@ -306,7 +349,7 @@ function renderAssigned() {
   if (!list.length) {
     const tr = el('tr');
     const td = el('td', 'muted', 'Không có task nào đang giao cho bạn.');
-    td.colSpan = 5;
+    td.colSpan = 6;
     tr.append(td);
     rows.append(tr);
   }
@@ -318,9 +361,191 @@ function renderAssigned() {
     const st = el('td', 'nowrap');
     st.append(chip(t.status));
     const due = el('td', 'nowrap' + (t.due && t.due < today ? ' overdue' : ''), t.due || '');
-    tr.append(key, el('td', '', t.title), el('td', 'nowrap', t.app), st, due);
+    const q = el('td', 'nowrap');
+    const inQueue = localPipeline().some((i) => i.key === t.key && !['skipped', 'done'].includes(i.state));
+    if (t.status === 'Todo' && !inQueue) q.append(btn('Đưa vào hàng đợi', 'small', () => act('/add', { key: t.key })));
+    tr.append(key, el('td', '', t.title), el('td', 'nowrap', t.app), st, due, q);
     rows.append(tr);
   }
+}
+
+// ---------- approval queue (this machine only: approving runs Claude here) ----------
+const APPR_STATE = {
+  pending: 'Chờ bạn duyệt phân tích',
+  queued: 'Đã duyệt · đang xếp lượt',
+  analyzing: 'Claude đang phân tích',
+  review: 'Chờ bạn duyệt solution',
+  failed: 'Lỗi',
+  skipped: 'Đã bỏ qua',
+  done: 'Đã xong',
+};
+const COMMENT_STATE = { posting: 'Đang gửi comment…', posted: 'Đã comment lên task', failed: 'Gửi comment lỗi', unknown: 'Không rõ đã gửi chưa' };
+const DEVHUB_STATE = { running: 'Claude đang ghi DevHub…', written: 'Đã ghi DevHub (đang comment, chờ xác nhận)', skipped: 'Không ghi DevHub', failed: 'Ghi DevHub lỗi', unknown: 'Không rõ đã ghi chưa' };
+const drafts = new Map(); // key → comment text you are editing
+const codeDrafts = new Map();
+const cardCache = new Map(); // key → {sig, node}
+const localPipeline = () => sources.get('')?.pipeline ?? [];
+
+async function act(path, body = {}) {
+  try {
+    const r = await fetch(`/api/pipeline${path}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    if (!r.ok) {
+      const j = await r.json().catch(() => ({}));
+      alertLine(j.error || `Lỗi ${r.status}`);
+      renderApprovals(true);
+    }
+  } catch (e) {
+    alertLine(e.message);
+    renderApprovals(true);
+  }
+}
+function alertLine(msg) {
+  const box = el('div', 'toast');
+  box.append(el('div', 'toast-title', msg));
+  $('#toasts').prepend(box);
+  setTimeout(() => box.remove(), 6000);
+}
+
+function btn(label, cls, onClick) {
+  const b = el('button', cls, label);
+  b.type = 'button';
+  b.addEventListener('click', () => {
+    b.disabled = true;
+    onClick();
+  });
+  return b;
+}
+
+function section(label, text) {
+  if (!text) return null;
+  const d = el('div', 'appr-sec');
+  d.append(el('b', '', label + ': '), el('span', '', text));
+  return d;
+}
+
+function approvalCard(it) {
+  const card = el('div', `appr ${it.state}`);
+  card.id = `appr-${it.key}`;
+  const top = el('div', 'card-top');
+  top.append(taskLink(it.key), el('span', `appr-state s-${it.state}`, APPR_STATE[it.state] ?? it.state));
+  if (it.priority === 'Urgent') top.append(el('span', 'urgent-tag', 'Urgent'));
+  if (it.app && it.app !== 'Khác') top.append(el('span', 'tag', it.app));
+  card.append(top, el('div', 'card-title', it.title));
+  const meta = [it.reporter && `từ ${it.reporter}`, it.due && `hạn ${it.due}`, `vào hàng đợi ${clock(it.createdAt)}`].filter(Boolean).join(' · ');
+  card.append(el('div', 'card-meta', meta));
+  const bs = it.bossStatus;
+  if (bs?.state && bs.state !== 'unknown') {
+    const text = {
+      moving: 'Đang chuyển status trên BOSS sang In Progress…',
+      moved: `BOSS: Todo → In Progress${bs.via === 'claude' ? ' (qua Claude)' : ''}`,
+      kept: `BOSS: giữ nguyên status ${bs.from ?? ''} (không còn là Todo)`,
+      failed: `Không chuyển được status: ${bs.error}`,
+    }[bs.state];
+    card.append(el('div', bs.state === 'failed' ? 'appr-err' : bs.state === 'moving' ? 'muted' : 'appr-ok', text));
+  }
+  const actions = el('div', 'appr-actions');
+
+  if (it.state === 'pending') {
+    if (it.note) card.append(el('div', 'muted', it.note));
+    actions.append(btn('Duyệt: chuyển In Progress + chạy /analyze-boss-task', 'primary', () => act(`/${it.key}/approve`)), btn('Bỏ qua', '', () => act(`/${it.key}/skip`)));
+  } else if (it.state === 'queued' || it.state === 'analyzing') {
+    if (it.startedAt) card.append(el('div', 'muted', `Bắt đầu ${clock(it.startedAt)} · thường mất 5–15 phút`));
+    actions.append(btn('Huỷ', '', () => act(`/${it.key}/cancel`)));
+  } else if (it.state === 'failed') {
+    card.append(el('div', 'appr-err', it.error ?? 'Lỗi'));
+    actions.append(btn('Thử lại', 'primary', () => act(`/${it.key}/approve`)), btn('Bỏ qua', '', () => act(`/${it.key}/skip`)));
+  } else if (it.state === 'review') {
+    const a = it.analysis ?? {};
+    if (it.error) card.append(el('div', 'appr-err', it.error));
+    for (const s of [
+      section('Tóm tắt', a.summary),
+      section('Loại', [a.type, a.store, a.confidence && `độ chắc: ${a.confidence}`].filter(Boolean).join(' · ')),
+      section('Nguyên nhân', a.rootCause),
+      section('Cách giải quyết', a.solution),
+      section('Cần xác minh', (a.needs ?? []).join(' · ')),
+    ]) if (s) card.append(s);
+
+    const det = el('details', 'appr-report');
+    det.append(el('summary', '', `Báo cáo đầy đủ${it.costUsd ? ` · $${Number(it.costUsd).toFixed(2)}` : ''}`), el('pre', '', it.report || '(trống)'));
+    card.append(det);
+
+    // comment: edit, then approve
+    const c = it.comment ?? {};
+    const cbox = el('div', 'appr-block');
+    cbox.append(el('div', 'appr-block-head', 'Comment lên task (sửa được trước khi duyệt)'));
+    if (['posting', 'posted', 'unknown'].includes(c.state)) {
+      cbox.append(el('pre', 'appr-pre', c.text));
+      const st = el('div', c.state === 'posted' ? 'appr-ok' : 'appr-err', COMMENT_STATE[c.state] + (c.via === 'claude' ? ' (qua Claude)' : ''));
+      cbox.append(st);
+      if (c.error) cbox.append(el('div', 'appr-err', c.error));
+    } else {
+      const ta = el('textarea', 'appr-text');
+      ta.rows = 6;
+      ta.value = drafts.get(it.key) ?? c.text ?? '';
+      ta.addEventListener('input', () => drafts.set(it.key, ta.value));
+      cbox.append(ta);
+      if (c.state === 'failed') cbox.append(el('div', 'appr-err', `${COMMENT_STATE.failed}: ${c.error}`));
+      const row = el('div', 'appr-actions');
+      row.append(
+        btn('Duyệt & comment lên task', 'primary', () => act(`/${it.key}/comment`, { text: ta.value })),
+        btn('Copy', '', () => Promise.resolve(navigator.clipboard?.writeText(ta.value)).catch(() => {}).finally(() => renderApprovals(true))),
+      );
+      cbox.append(row);
+    }
+    card.append(cbox);
+
+    // DevHub: only when the analysis proposed code
+    if (a.devhub?.code) {
+      const d = it.devhub ?? {};
+      const dbox = el('div', 'appr-block');
+      dbox.append(el('div', 'appr-block-head', `Code DevHub đề xuất${a.devhub.purpose ? ': ' + a.devhub.purpose : ''}`));
+      if (a.devhub.notes) dbox.append(el('div', 'muted', a.devhub.notes));
+      if (['running', 'written', 'unknown'].includes(d.state)) {
+        dbox.append(el('pre', 'appr-pre', a.devhub.code));
+      } else {
+        const ta = el('textarea', 'appr-text mono');
+        ta.rows = 8;
+        ta.value = codeDrafts.get(it.key) ?? a.devhub.code;
+        ta.addEventListener('input', () => codeDrafts.set(it.key, ta.value));
+        dbox.append(ta);
+        const row = el('div', 'appr-actions');
+        row.append(btn('Cấp quyền ghi DevHub', 'primary', () => act(`/${it.key}/devhub`, { code: ta.value })));
+        row.append(el('span', 'muted', 'Ghi ở dạng comment (CHỜ XÁC NHẬN) theo luật autofix-boss; bật code bằng /autofix-boss confirm.'));
+        dbox.append(row);
+      }
+      if (d.state) dbox.append(el('div', d.state === 'written' ? 'appr-ok' : d.state === 'running' ? 'muted' : 'appr-err', [DEVHUB_STATE[d.state], d.detail, d.error].filter(Boolean).join(': ')));
+      card.append(dbox);
+    }
+    actions.append(btn('Xong, ẩn khỏi hàng đợi', '', () => act(`/${it.key}/done`)), btn('Bỏ qua', '', () => act(`/${it.key}/skip`)));
+  }
+  if (actions.childElementCount) card.append(actions);
+  return card;
+}
+
+function renderApprovals(force = false) {
+  const all = localPipeline();
+  const active = all.filter((i) => !['skipped', 'done'].includes(i.state));
+  $('#appr-panel').hidden = !active.length;
+  const n = (st) => active.filter((i) => i.state === st).length;
+  $('#appr-note').textContent = [n('pending') && `${n('pending')} chờ duyệt phân tích`, n('analyzing') + n('queued') && `${n('analyzing') + n('queued')} đang phân tích`, n('review') && `${n('review')} chờ duyệt solution`].filter(Boolean).join(' · ');
+  const list = $('#appr-list');
+  const keep = new Set();
+  const nodes = [];
+  for (const it of active) {
+    keep.add(it.key);
+    const sig = JSON.stringify(it);
+    let c = cardCache.get(it.key);
+    if (force || !c || c.sig !== sig) {
+      // keep what you typed and whether the report was open
+      const wasOpen = c?.node.querySelector('details')?.open;
+      c = { sig, node: approvalCard(it) };
+      if (wasOpen) c.node.querySelector('details').open = true;
+      cardCache.set(it.key, c);
+    }
+    nodes.push(c.node);
+  }
+  for (const k of cardCache.keys()) if (!keep.has(k)) cardCache.delete(k);
+  if (nodes.length !== list.children.length || nodes.some((nd, i) => list.children[i] !== nd)) list.replaceChildren(...nodes);
 }
 
 // ---------- toasts: a task newly assigned to you ----------
@@ -346,7 +571,7 @@ function chime() {
   }
 }
 
-function showToast(item) {
+function showToast(item, src) {
   const box = el('div', 'toast');
   box.setAttribute('role', 'status');
   const head = el('div', 'toast-head');
@@ -365,15 +590,31 @@ function showToast(item) {
     open.textContent = 'Mở trên BOSS';
     actions.append(open);
   }
+  const queued = localPipeline().find((i) => i.key === item.task);
+  if (item.type === 'assigned' && queued && ['queued', 'analyzing'].includes(queued.state) && src === sources.get('')) {
+    box.append(el('div', 'toast-meta', 'Đã tự chuyển In Progress và đang chạy /analyze-boss-task'));
+  }
+  if (item.type === 'assigned' && queued?.state === 'pending' && src === sources.get('')) {
+    actions.prepend(btn('Duyệt phân tích', 'primary', () => {
+      act(`/${item.task}/approve`);
+      dismiss();
+    }));
+  }
+  if (item.type === 'review') {
+    actions.prepend(btn('Xem solution', 'primary', () => {
+      document.getElementById(`appr-${item.task}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      dismiss();
+    }));
+  }
   const later = el('button', '', 'Để sau');
   later.type = 'button';
   actions.append(later);
   box.append(actions);
-  const dismiss = () => {
+  function dismiss() {
     box.remove();
     openToasts = Math.max(0, openToasts - 1);
     updateTitle();
-  };
+  }
   close.addEventListener('click', dismiss);
   later.addEventListener('click', dismiss);
   actions.querySelector('a')?.addEventListener('click', dismiss);
@@ -460,7 +701,7 @@ document.addEventListener('keydown', (e) => {
 
 // ---------- live connections ----------
 function connect(origin, machine) {
-  const src = { origin, machine, connected: false, boss: null, sessions: new Map(), feed: [] };
+  const src = { origin, machine, connected: false, boss: null, sessions: new Map(), feed: [], pipeline: [] };
   sources.set(origin, src);
   const es = new EventSource(`${origin}/events`);
   es.onopen = () => {
@@ -477,6 +718,7 @@ function connect(origin, machine) {
     src.boss = d.boss;
     src.sessions = new Map(d.sessions.map((s) => [s.id, s]));
     src.feed = d.feed;
+    src.pipeline = d.pipeline ?? [];
     renderAll();
   });
   es.addEventListener('boss', (e) => {
@@ -486,6 +728,14 @@ function connect(origin, machine) {
     renderMine();
     renderAssigned();
     renderOffice();
+  });
+  es.addEventListener('pipeline', (e) => {
+    src.pipeline = JSON.parse(e.data);
+    if (origin === '') {
+      renderApprovals();
+      renderAssigned();
+      renderOffice();
+    }
   });
   es.addEventListener('session', (e) => {
     const s = JSON.parse(e.data);
@@ -500,7 +750,8 @@ function connect(origin, machine) {
     src.feed.push(item);
     if (src.feed.length > 300) src.feed.shift();
     renderFeed();
-    if (item.type === 'assigned' && src === bossSource()) showToast(item);
+    if (item.type === 'assigned' && src === bossSource()) showToast(item, src);
+    if (item.type === 'review' && src === sources.get('')) showToast(item, src);
     notify(item, src);
   });
 }

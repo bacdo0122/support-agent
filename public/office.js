@@ -63,7 +63,20 @@ const mix = (a, b, t) => {
 };
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
 
+// Pipeline agents (one per approval-queue task) walk in through the entrance at the east end of the corridor
+// and leave the same way. Waypoints keep them in the corridor and through the gap in each room's glass front.
+const DOOR = { x: 22.3, y: 8.1 };
+const HALL_Y = 8.55;
+function routeIn(room, seat) {
+  const r = ROOMS.find((x) => x.app === room);
+  if (!r) return [{ x: 20.4, y: HALL_Y }, { x: seat.x, y: HALL_Y }, seat];
+  const gx = (r.x0 + r.x1) / 2 + 0.9; // beside the reception counter
+  return [{ x: 20.4, y: HALL_Y }, { x: gx, y: HALL_Y }, { x: gx, y: 6.0 }, seat];
+}
+const routeOut = (room, seat) => [...routeIn(room, seat).slice(0, -1).reverse(), DOOR];
+
 export function roomForSession(s, tasks) {
+  if (APP[s.app]) return s.app;
   const t = s.task && tasks.find((x) => x.key === s.task);
   if (t && APP[t.app]) return t.app;
   const p = `${s.project} ${s.cwd}`.toLowerCase();
@@ -715,7 +728,13 @@ export function createOffice(canvas, { onSelect, onView } = {}) {
   function assignSpots() {
     const live = new Set(sessions.map((s) => s.key));
     for (const k of [...deskOf.keys()]) if (!live.has(k)) deskOf.delete(k);
-    for (const k of [...actors.keys()]) if (!live.has(k)) actors.delete(k);
+    for (const [k, a] of [...actors.entries()]) {
+      if (live.has(k)) continue;
+      // an agent whose task is finished or skipped walks out; anything else just disappears
+      if (a.s.agent && !reduceMotion) {
+        if (!a.leaving) Object.assign(a, { leaving: true, path: routeOut(a.room, { x: a.x, y: a.y }), sit: false, s: { ...a.s, status: 'idle' } });
+      } else actors.delete(k);
+    }
     const taken = (room, i) => [...deskOf.values()].some((d) => d.room === room && d.i === i);
     let lounge = 0;
     let stand = 0;
@@ -739,8 +758,16 @@ export function createOffice(canvas, { onSelect, onView } = {}) {
       else target = { x: 10 + (stand++ % 8) * 0.8, y: 8.6 };
       const room = d?.room ?? want;
       const a = actors.get(s.key);
-      if (!a) actors.set(s.key, { x: target.x, y: target.y, tx: target.x, ty: target.y, sit: target.sit, s, room });
-      else Object.assign(a, { tx: target.x, ty: target.y, sit: target.sit, s, room });
+      if (!a) {
+        // a new agent enters from the street door and walks to its desk; sessions appear in place
+        const walkIn = s.agent && d && !reduceMotion;
+        const start = walkIn ? DOOR : target;
+        actors.set(s.key, { x: start.x, y: start.y, tx: target.x, ty: target.y, sit: target.sit, s, room, path: walkIn ? routeIn(room, target) : [] });
+      } else {
+        const moved = Math.abs(a.tx - target.x) > 0.01 || Math.abs(a.ty - target.y) > 0.01;
+        Object.assign(a, { tx: target.x, ty: target.y, sit: target.sit, s, room, leaving: false });
+        if (moved || a.leaving) a.path = [];
+      }
     }
   }
 
@@ -751,12 +778,28 @@ export function createOffice(canvas, { onSelect, onView } = {}) {
     const dt = Math.min(0.1, (ts - last) / 1000);
     last = ts;
     let moving = false;
-    for (const a of actors.values()) {
-      const dx = a.tx - a.x;
-      const dy = a.ty - a.y;
+    for (const [k, a] of [...actors.entries()]) {
+      // follow waypoints first (agents walking in or out), then the target spot
+      while (a.path?.length && Math.hypot(a.path[0].x - a.x, a.path[0].y - a.y) < 0.02) a.path.shift();
+      if (a.leaving && !a.path?.length) {
+        actors.delete(k);
+        moving = true;
+        continue;
+      }
+      const goal = a.path?.length ? a.path[0] : { x: a.tx, y: a.ty };
+      const dx = goal.x - a.x;
+      const dy = goal.y - a.y;
       const dist = Math.hypot(dx, dy);
       const step = reduceMotion ? dist : 3 * dt;
-      if (dist > 0.01) {
+      if (a.path?.length) {
+        moving = true;
+        a.walking = true;
+        if (dist <= step) Object.assign(a, { x: goal.x, y: goal.y });
+        else {
+          a.x += (dx / dist) * step;
+          a.y += (dy / dist) * step;
+        }
+      } else if (dist > 0.01) {
         moving = true;
         a.walking = dist > step;
         if (dist <= step) {
@@ -841,7 +884,7 @@ export function createOffice(canvas, { onSelect, onView } = {}) {
     const showAction = sessions.filter((s) => s.status === 'working').length <= 3;
     for (const a of actors.values()) {
       const s = a.s;
-      const seated = a.sit && !a.walking;
+      const seated = a.sit && !a.walking && !a.path?.length;
       const room = APP[a.room] ? a.room : 'Chung';
       const isHover = hover && hover.key === s.key;
       const isSel = selected === s.key;
@@ -862,9 +905,9 @@ export function createOffice(canvas, { onSelect, onView } = {}) {
       });
       const head = toScreen(iso(a.x, a.y, seated ? 70 : 58));
       const feet = toScreen(iso(a.x, a.y));
-      hits.push({ s, x0: feet.x - 16 * scale - 4, x1: feet.x + 16 * scale + 4, y0: head.y - 4, y1: feet.y + 6 });
+      if (!a.leaving) hits.push({ s, x0: feet.x - 16 * scale - 4, x1: feet.x + 16 * scale + 4, y0: head.y - 4, y1: feet.y + 6 });
       bodies.push({ x0: feet.x - 11 * scale, x1: feet.x + 11 * scale, y0: head.y - 2, y1: feet.y - (seated ? 14 * scale : 0) });
-      labels.push({ kind: 'session', p: head, s, t, action: s.status === 'waiting' || (s.status === 'working' && (showAction || isHover || isSel)) });
+      labels.push({ kind: 'session', p: head, s, t, action: !a.leaving && (s.status === 'waiting' || (s.status === 'working' && (showAction || isHover || isSel))) });
     }
 
     list.sort((a, b) => a.d - b.d);

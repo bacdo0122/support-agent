@@ -42,6 +42,14 @@
     </aside>
 
     <section class="center">
+      <div class="panel approvals" id="appr-panel" hidden>
+        <div class="panel-head row">
+          <h2>Hàng đợi duyệt</h2>
+          <p class="muted" id="appr-note"></p>
+        </div>
+        <div id="appr-list" class="appr-list"></div>
+      </div>
+
       <div class="seg tabs" role="tablist" aria-label="Chế độ xem">
         <button type="button" role="tab" id="tab-office" aria-selected="true" aria-pressed="true" data-view="office">Văn phòng</button>
         <button type="button" role="tab" id="tab-list" aria-selected="false" aria-pressed="false" data-view="list">Danh sách task</button>
@@ -70,6 +78,7 @@
           <span><i class="lg waiting"></i>Chờ duyệt</span>
           <span><i class="lg idle"></i>Phòng nghỉ = xong lượt, chờ bạn</span>
           <span><i class="lg queue"></i>Khách xếp hàng = task Todo</span>
+          <span><i class="lg working"></i>Agent = task trong hàng đợi duyệt (ra về khi xong / bỏ qua)</span>
           <span class="hint-drag">Kéo để di chuyển · cuộn để phóng to</span>
         </div>
         <div class="popover" id="popover" hidden></div>
@@ -103,7 +112,7 @@
         </div>
         <div class="table-wrap">
           <table>
-            <thead><tr><th>Task</th><th>Tiêu đề</th><th>App</th><th>Trạng thái</th><th>Hạn</th></tr></thead>
+            <thead><tr><th>Task</th><th>Tiêu đề</th><th>App</th><th>Trạng thái</th><th>Hạn</th><th></th></tr></thead>
             <tbody id="assigned-rows"></tbody>
           </table>
         </div>
