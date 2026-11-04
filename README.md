@@ -23,7 +23,7 @@ npm test
 
 ## Hàng đợi duyệt (task Todo mới giao cho bạn → phân tích → duyệt solution)
 
-Mặc định (`AUTO_ANALYZE=1`) bước 1–2 tự chạy, không cần bạn duyệt: task mới vào hàng đợi là chuyển In Progress rồi phân tích ngay. Riêng task lúc kiểm tra đã không còn ở Todo (người khác hoặc máy kia đã nhận) thì không tự chạy mà chờ bạn bấm Duyệt. `AUTO_ANALYZE=0` để quay lại duyệt tay. Bước 3 (comment, DevHub) luôn cần bạn duyệt.
+Mặc định (`AUTO_ANALYZE=1`) bước 1–2 tự chạy, không cần bạn duyệt: task mới vào hàng đợi là phân tích ngay, **không** đổi status trên BOSS (task vẫn ở Todo). Chỉ khi bạn tự bấm Duyệt (task thêm tay, hoặc chạy lại task lỗi) thì mới chuyển Todo → In Progress như bước 2. `AUTO_ANALYZE=0` để quay lại duyệt tay. Bước 3 (comment, DevHub) luôn cần bạn duyệt.
 
 1. `lib/poller.mjs` thấy task **mới giao cho bạn ở trạng thái Todo** (hoặc vừa quay lại Todo) → `lib/pipeline.mjs` đưa vào panel "Hàng đợi duyệt" ở trạng thái *chờ bạn duyệt phân tích*. Chưa chạy gì. Task Todo có từ trước: bấm "Đưa vào hàng đợi" ở bảng "Giao cho tôi".
 2. Bấm **Duyệt** → server đọc status task trên BOSS: còn **Todo** thì chuyển sang **In Progress** (`update_task`, bằng `BOSS_TOKEN`, thiếu quyền `mcp:task:write` thì qua connector BOSS của Claude với profile chỉ có `read_task`/`update_task`); đã ở status khác thì giữ nguyên. Không chuyển được thì dừng, báo lỗi, chưa phân tích. Sau đó chạy `claude -p "/analyze-boss-task <ID>"` (headless, `--permission-mode dontAsk`, chỉ các tool đọc: BOSS đọc, Read/Grep, chrome-devtools đọc; cấm comment, DevHub, sửa file). Mỗi lần một task. Kết quả (tóm tắt, nguyên nhân, solution, bản nháp comment, code DevHub nếu có) hiện trong thẻ task, kèm báo cáo đầy đủ.

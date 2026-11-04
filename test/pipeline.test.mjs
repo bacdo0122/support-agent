@@ -232,7 +232,7 @@ test('the status profile can only read the task and update it', () => {
   assert.ok(PROFILES.analyze.denied.includes('mcp__claude_ai_BOSS-SBC__update_task'));
 });
 
-test('with autoAnalyze a new task moves to In Progress and is analyzed without approval', async () => {
+test('with autoAnalyze a new task is analyzed without approval and its BOSS status is left alone', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'pipe-'));
   const client = statusClient('Todo');
   const runs = [];
@@ -240,27 +240,26 @@ test('with autoAnalyze a new task moves to In Progress and is analyzed without a
   const p = createPipeline({ statePath: join(dir, 'p.json'), bus: bus(), runner, client, autoAnalyze: true });
   p.offer(task);
   await settle();
-  assert.deepEqual(client.calls.map(([n]) => n), ['read_task', 'update_task']);
+  assert.deepEqual(client.calls, [], 'no read_task / update_task');
   assert.deepEqual(runs, ['/analyze-boss-task SBCB2BBS-1']);
+  assert.equal(p.get(task.key).bossStatus, null);
   assert.equal(p.get(task.key).state, 'review');
   assert.throws(() => p.approveComment('nope', 'x'), /Không có task/);
   assert.equal(p.get(task.key).comment.state, 'draft', 'the comment still waits for you');
 });
 
-test('with autoAnalyze a task no longer in Todo waits for you instead of running', async () => {
+test('with autoAnalyze a failed task you approve again does move to In Progress', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'pipe-'));
-  const runs = [];
-  const runner = { run: async (o) => (runs.push(o.profile), { text: reply({ comment: '' }) }) };
-  const b = bus();
-  const p = createPipeline({ statePath: join(dir, 'p.json'), bus: b, runner, client: statusClient('In Progress'), autoAnalyze: true });
+  const client = statusClient('Todo');
+  let fail = true;
+  const runner = { run: async () => { if (fail) { fail = false; throw new Error('boom'); } return { text: reply({ comment: '' }) }; } };
+  const p = createPipeline({ statePath: join(dir, 'p.json'), bus: bus(), runner, client, autoAnalyze: true });
   p.offer(task);
   await settle();
-  const it = p.get(task.key);
-  assert.equal(it.state, 'pending');
-  assert.match(it.note, /In Progress/);
-  assert.deepEqual(runs, []);
+  assert.equal(p.get(task.key).state, 'failed');
+  assert.deepEqual(client.calls, []);
   p.approve(task.key);
   await settle();
-  assert.equal(it.state, 'review', 'your approval still runs it');
-  assert.equal(it.note, null);
+  assert.deepEqual(client.calls.map(([n]) => n), ['read_task', 'update_task']);
+  assert.deepEqual([p.get(task.key).bossStatus.state, p.get(task.key).state], ['moved', 'review']);
 });
