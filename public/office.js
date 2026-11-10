@@ -479,6 +479,20 @@ export function createOffice(canvas, { onSelect, onView } = {}) {
     });
     chair(16.6, 18.55, '#7a2e3a');
     chair(17.9, 18.55, '#7a2e3a');
+
+    // nhân viên trong phòng giám đốc
+    add(statics, 17.2 + 18.9 + 0.12, () => {
+      person(iso(17.2, 18.9), {
+        shirt: '#5a9bd6',
+        seed: 'director-staff',
+        t: now,
+        scale: 0.88,
+        sitting: true,
+        bob: reduceMotion ? 0 : Math.sin(now * 1.8) * 0.6,
+      });
+    });
+
+
     addBox(12.35, 17.0, 0.3, 2.6, 26, '#3f4a63');
     addBox(12.65, 17.0, 0.6, 2.6, 12, '#4d5a78', { top: '#5a6888' });
     addBox(13.6, 17.6, 0.8, 1.4, 10, '#6b452e', { noSplit: true });
@@ -491,6 +505,7 @@ export function createOffice(canvas, { onSelect, onView } = {}) {
     addBox(20.88, 0, 0.12, 7.2, 12, '#ece6da', low);
     addBox(20.88, 9.0, 0.12, 12, 12, '#ece6da', low);
 
+    
     city.build();
   }
 

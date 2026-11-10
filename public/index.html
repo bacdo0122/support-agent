@@ -21,6 +21,7 @@
     <div class="actions">
       <span class="pill" id="boss-pill"><span class="dot"></span><span id="boss-text">Đang kết nối…</span></span>
       <span id="machines" class="machines"></span>
+      <button type="button" id="btn-auto" class="toggle" aria-pressed="false" hidden title="Bật: task mới assign cho bạn được phân tích ngay. Tắt: task mới chờ bạn bấm Duyệt.">Tự động phân tích: …</button>
       <button type="button" id="btn-poll">Làm mới BOSS</button>
       <button type="button" id="btn-notify">Bật thông báo</button>
     </div>
@@ -48,6 +49,14 @@
           <p class="muted" id="appr-note"></p>
         </div>
         <div id="appr-list" class="appr-list"></div>
+      </div>
+
+      <div class="panel learn" id="learn-panel" hidden>
+        <div class="panel-head row">
+          <h2>Học từ task</h2>
+          <p class="muted" id="learn-note"></p>
+        </div>
+        <div id="learn-body"></div>
       </div>
 
       <div class="seg tabs" role="tablist" aria-label="Chế độ xem">

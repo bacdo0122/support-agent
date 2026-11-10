@@ -294,10 +294,13 @@ function pipelineAgents() {
     let waitingFor = '';
     if (it.state === 'pending') [status, waitingFor] = ['waiting', it.note ? 'task không còn Todo, duyệt để phân tích' : 'duyệt phân tích'];
     else if (it.state === 'queued') lastAction = it.bossStatus?.state === 'moving' ? 'Chuyển status sang In Progress' : 'Chờ lượt phân tích';
-    else if (it.state === 'analyzing') lastAction = 'Đang chạy /analyze-boss-task';
+    else if (it.state === 'analyzing') lastAction = it.verify?.state === 'running' ? 'Đang kiểm chứng từng câu trả lời' : 'Đang chạy /analyze-boss-task';
     else if (it.state === 'failed') [status, waitingFor] = ['waiting', `lỗi: ${it.error ?? ''}`];
     else if (it.comment?.state === 'posting') lastAction = 'Đang comment lên task';
     else if (it.devhub?.state === 'running') lastAction = 'Đang ghi DevHub';
+    else if (it.asking) lastAction = 'Đang kiểm tra lại theo câu hỏi của bạn';
+    else if (it.trial?.state === 'running') lastAction = 'Đang thử fix trên store (không lưu gì)';
+    else if (['enabling', 'checking', 'reverting'].includes(it.devhub?.live?.state)) lastAction = 'Đang bật code DevHub và kiểm tra store';
     else [status, waitingFor] = ['waiting', 'duyệt solution'];
     const app = APP_ROOMS.includes(it.app) ? it.app : APP_ROOMS.includes(it.analysis?.app) ? it.analysis.app : 'Chung';
     agents.push({
@@ -334,6 +337,7 @@ function renderAll() {
   renderMine();
   renderAssigned();
   renderApprovals();
+  renderLearn(true);
   renderFeed();
   renderOffice();
 }
@@ -380,9 +384,21 @@ const APPR_STATE = {
   done: 'Đã xong',
 };
 const COMMENT_STATE = { posting: 'Đang gửi comment…', posted: 'Đã comment lên task', failed: 'Gửi comment lỗi', unknown: 'Không rõ đã gửi chưa' };
-const DEVHUB_STATE = { running: 'Claude đang ghi DevHub…', written: 'Đã ghi DevHub (đang comment, chờ xác nhận)', skipped: 'Không ghi DevHub', failed: 'Ghi DevHub lỗi', unknown: 'Không rõ đã ghi chưa' };
+const DEVHUB_STATE = { running: 'Đang thêm code vào DevHub…', written: 'Đã thêm vào DevHub (code cũ giữ nguyên, block mới đang comment, chờ xác nhận)', skipped: 'Không ghi DevHub', failed: 'Ghi DevHub lỗi', unknown: 'Cần kiểm tra lại DevHub' };
+// The comment must have exactly the 4 sections of the team template, in order (lib/claude.mjs COMMENT_SECTIONS).
+const SECTIONS = ['Root Cause', 'Solution', 'Technical Details', 'Result'];
+function templateIssue(text) {
+  const found = String(text).split(/\r?\n/).map((l) => l.trim().match(/^(Root Cause|Solution|Technical Details|Result)\s*:/i)?.[1])
+    .filter(Boolean).map((x) => SECTIONS.find((s) => s.toLowerCase() === x.toLowerCase()));
+  const missing = SECTIONS.filter((s) => !found.includes(s));
+  if (missing.length) return `thiếu ${missing.join(', ')}`;
+  if (found.length > SECTIONS.length) return 'có mục bị lặp';
+  return found.join() === SECTIONS.join() ? '' : 'sai thứ tự mục';
+}
 const drafts = new Map(); // key → comment text you are editing
 const codeDrafts = new Map();
+const chatDrafts = new Map();
+const CHAT_FIELDS = { checks: 'phần đã kiểm tra', summary: 'tóm tắt', rootCause: 'nguyên nhân', solution: 'solution', comment: 'bản nháp comment', devhub: 'code DevHub' };
 const cardCache = new Map(); // key → {sig, node}
 const localPipeline = () => sources.get('')?.pipeline ?? [];
 
@@ -447,13 +463,14 @@ function approvalCard(it) {
 
   if (it.state === 'pending') {
     if (it.note) card.append(el('div', 'muted', it.note));
-    actions.append(btn('Duyệt: chuyển In Progress + chạy /analyze-boss-task', 'primary', () => act(`/${it.key}/approve`)), btn('Bỏ qua', '', () => act(`/${it.key}/skip`)));
+    actions.append(btn('Duyệt: chuyển In Progress + chạy /analyze-boss-task', 'primary', () => act(`/${it.key}/approve`)), skipButton(it));
   } else if (it.state === 'queued' || it.state === 'analyzing') {
     if (it.startedAt) card.append(el('div', 'muted', `Bắt đầu ${clock(it.startedAt)} · thường mất 5–15 phút`));
+    if (it.verify?.state === 'running') card.append(el('div', 'muted', 'Đã soạn câu trả lời, đang kiểm chứng lại từng câu bằng một phiên độc lập…'));
     actions.append(btn('Huỷ', '', () => act(`/${it.key}/cancel`)));
   } else if (it.state === 'failed') {
     card.append(el('div', 'appr-err', it.error ?? 'Lỗi'));
-    actions.append(btn('Thử lại', 'primary', () => act(`/${it.key}/approve`)), btn('Bỏ qua', '', () => act(`/${it.key}/skip`)));
+    actions.append(btn('Thử lại', 'primary', () => act(`/${it.key}/approve`)), skipButton(it));
   } else if (it.state === 'review') {
     const a = it.analysis ?? {};
     if (it.error) card.append(el('div', 'appr-err', it.error));
@@ -462,15 +479,24 @@ function approvalCard(it) {
       section('Loại', [a.type, a.store, a.confidence && `độ chắc: ${a.confidence}`].filter(Boolean).join(' · ')),
       section('Nguyên nhân', a.rootCause),
       section('Cách giải quyết', a.solution),
+      section('Đã kiểm tra', (a.checks ?? []).map((c) => `[${c.what === 'sentry' ? 'Sentry' : c.what === 'store' ? 'Store' : c.what === 'admin' ? 'Admin' : c.what}] ${c.result ?? ''}`).join(' · ')),
       section('Cần xác minh', (a.needs ?? []).join(' · ')),
     ]) if (s) card.append(s);
+    if (a.questions?.length) card.append(questionsBlock(it, a));
+    const probe = denialsBlock(it.denials, it.images, it.prefetch);
+    if (probe) card.append(probe);
 
+    // the whole report of the skill, as in the CLI (open unless you closed it)
     const det = el('details', 'appr-report');
-    det.append(el('summary', '', `Báo cáo đầy đủ${it.costUsd ? ` · $${Number(it.costUsd).toFixed(2)}` : ''}`), el('pre', '', it.report || '(trống)'));
+    det.open = true;
+    det.append(el('summary', '', `Báo cáo đầy đủ của /analyze-boss-task${it.costUsd ? ` · $${Number(it.costUsd).toFixed(2)}` : ''}`), el('pre', '', it.report || '(trống)'));
     card.append(det);
+    card.append(chatBlock(it));
 
     // comment: edit, then approve
     const c = it.comment ?? {};
+    // the same approval appends the proposed code to DevHub (kept existing code, new block commented out)
+    const withDevhub = !!a.devhub?.code && ['proposed', 'failed', undefined].includes(it.devhub?.state);
     const cbox = el('div', 'appr-block');
     cbox.append(el('div', 'appr-block-head', 'Comment lên task (sửa được trước khi duyệt)'));
     if (['posting', 'posted', 'unknown'].includes(c.state)) {
@@ -482,12 +508,23 @@ function approvalCard(it) {
       const ta = el('textarea', 'appr-text');
       ta.rows = 6;
       ta.value = drafts.get(it.key) ?? c.text ?? '';
-      ta.addEventListener('input', () => drafts.set(it.key, ta.value));
-      cbox.append(ta);
+      const fmt = el('div', 'appr-warn');
+      const checkFmt = () => {
+        const msg = templateIssue(ta.value);
+        fmt.textContent = msg ? `Chưa đúng template Root Cause / Solution / Technical Details / Result: ${msg}` : '';
+        fmt.hidden = !msg;
+      };
+      ta.addEventListener('input', () => {
+        drafts.set(it.key, ta.value);
+        checkFmt();
+      });
+      checkFmt();
+      cbox.append(ta, fmt);
       if (c.state === 'failed') cbox.append(el('div', 'appr-err', `${COMMENT_STATE.failed}: ${c.error}`));
       const row = el('div', 'appr-actions');
       row.append(
-        btn('Duyệt & comment lên task', 'primary', () => act(`/${it.key}/comment`, { text: ta.value })),
+        btn(withDevhub ? 'Duyệt: comment lên task + thêm code DevHub' : 'Duyệt & comment lên task', 'primary',
+          () => act(`/${it.key}/comment`, { text: ta.value, code: withDevhub ? codeDrafts.get(it.key) ?? a.devhub.code : undefined })),
         btn('Copy', '', () => Promise.resolve(navigator.clipboard?.writeText(ta.value)).catch(() => {}).finally(() => renderApprovals(true))),
       );
       cbox.append(row);
@@ -500,26 +537,364 @@ function approvalCard(it) {
       const dbox = el('div', 'appr-block');
       dbox.append(el('div', 'appr-block-head', `Code DevHub đề xuất${a.devhub.purpose ? ': ' + a.devhub.purpose : ''}`));
       if (a.devhub.notes) dbox.append(el('div', 'muted', a.devhub.notes));
+      let codeBox = null;
       if (['running', 'written', 'unknown'].includes(d.state)) {
         dbox.append(el('pre', 'appr-pre', a.devhub.code));
       } else {
         const ta = el('textarea', 'appr-text mono');
+        codeBox = ta;
         ta.rows = 8;
         ta.value = codeDrafts.get(it.key) ?? a.devhub.code;
         ta.addEventListener('input', () => codeDrafts.set(it.key, ta.value));
         dbox.append(ta);
         const row = el('div', 'appr-actions');
-        row.append(btn('Cấp quyền ghi DevHub', 'primary', () => act(`/${it.key}/devhub`, { code: ta.value })));
-        row.append(el('span', 'muted', 'Ghi ở dạng comment (CHỜ XÁC NHẬN) theo luật autofix-boss; bật code bằng /autofix-boss confirm.'));
+        row.append(btn('Chỉ thêm code DevHub', '', () => act(`/${it.key}/devhub`, { code: ta.value })));
+        row.append(el('span', 'muted', 'Duyệt ở trên là tự thêm vào DevHub: giữ nguyên code đang có, nối block mới ở cuối, dạng comment (CHỜ XÁC NHẬN). Bật code bằng /autofix-boss confirm.'));
         dbox.append(row);
       }
       if (d.state) dbox.append(el('div', d.state === 'written' ? 'appr-ok' : d.state === 'running' ? 'muted' : 'appr-err', [DEVHUB_STATE[d.state], d.detail, d.error].filter(Boolean).join(': ')));
+      if (d.state === 'written' || d.state === 'unknown') {
+        dbox.append(el('div', 'muted', [d.domain, d.version != null && `version mới ${d.version}`, d.previousVersion != null && `trước đó ${d.previousVersion} (restore được)`].filter(Boolean).join(' · ')));
+        if (d.block) {
+          const det = el('details', 'appr-report');
+          det.append(el('summary', '', 'Block đã thêm'), el('pre', '', d.block));
+          dbox.append(det);
+        }
+      }
+      dbox.append(trialBlock(it, a, () => codeBox?.value));
       card.append(dbox);
     }
-    actions.append(btn('Xong, ẩn khỏi hàng đợi', '', () => act(`/${it.key}/done`)), btn('Bỏ qua', '', () => act(`/${it.key}/skip`)));
+    actions.append(btn('Xong, ẩn khỏi hàng đợi', '', () => act(`/${it.key}/done`)), skipButton(it));
   }
   if (actions.childElementCount) card.append(actions);
   return card;
+}
+
+// "Bỏ qua" asks why (feeds the lessons): one click opens the reasons, one more picks one
+const skipOpen = new Set();
+const SKIP_REASONS = { wrong: 'Sai nguyên nhân / solution', elsewhere: 'Đã xử lý ở chỗ khác', 'not-needed': 'Không cần xử lý', other: 'Khác' };
+function skipButton(it) {
+  if (!skipOpen.has(it.key)) {
+    const b = el('button', '', 'Bỏ qua');
+    b.type = 'button';
+    b.addEventListener('click', () => (skipOpen.add(it.key), renderApprovals(true)));
+    return b;
+  }
+  const wrap = el('span', 'skip-reasons');
+  wrap.append(el('span', 'muted', 'Vì sao bỏ qua?'));
+  for (const [k, label] of Object.entries(SKIP_REASONS)) wrap.append(btn(label, '', () => (skipOpen.delete(it.key), act(`/${it.key}/skip`, { reason: k }))));
+  const x = el('button', '', '×');
+  x.type = 'button';
+  x.title = 'Không bỏ qua nữa';
+  x.addEventListener('click', () => (skipOpen.delete(it.key), renderApprovals(true)));
+  wrap.append(x);
+  return wrap;
+}
+
+// ---- learning: lessons waiting for you, approved lessons, recent feedback, cases ----
+const EDIT_LABEL = { kept: ['appr-ok', 'Giữ nguyên bản nháp'], light: ['muted', 'Sửa một phần'], rewritten: ['appr-err', 'Viết lại'] };
+const lessonDrafts = new Map();
+let learnSig = '';
+async function lessonAct(id, action, body = {}) {
+  try {
+    const r = await fetch(`/api/learn/lesson/${id}/${action}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    if (!r.ok) alertLine((await r.json().catch(() => ({}))).error || `Lỗi ${r.status}`);
+  } catch (e) {
+    alertLine(e.message);
+  }
+}
+function renderLearn(force = false) {
+  const L = sources.get('')?.learn;
+  const panel = $('#learn-panel');
+  if (!L) return void (panel.hidden = true);
+  const sig = JSON.stringify(L);
+  if (!force && sig === learnSig) return;
+  // do not rebuild under your cursor while you edit a lesson
+  if (!force && panel.contains(document.activeElement) && document.activeElement.tagName === 'TEXTAREA') return;
+  learnSig = sig;
+  const pending = L.lessons.filter((l) => l.state === 'proposed');
+  const approved = L.lessons.filter((l) => l.state === 'approved');
+  panel.hidden = !pending.length && !approved.length && !L.recent.length && !L.casesCount;
+  $('#learn-note').textContent = [pending.length && `${pending.length} bài học chờ duyệt`, `${approved.length} đã duyệt`, `${L.casesCount} case của bạn`,
+    L.teamCases?.withAnswer && `${L.teamCases.withAnswer} tiền lệ của team`,
+    L.moduleMap?.exists && (L.moduleMap.draft ? 'bản đồ tính năng: chờ duyệt' : 'bản đồ tính năng: đang dùng')].filter(Boolean).join(' · ');
+  const body = $('#learn-body');
+  const open = new Set([...body.querySelectorAll('details[open]')].map((d) => d.dataset.k));
+  const nodes = [];
+
+  const lessonCard = (l) => {
+    const card = el('div', 'lesson');
+    const top = el('div', 'card-top');
+    top.append(el('span', 'tag', l.app), l.topic ? el('b', '', l.topic) : '', l.fromTask ? taskLink(l.fromTask) : '');
+    const ta = el('textarea', 'appr-text');
+    ta.rows = 2;
+    ta.value = lessonDrafts.get(l.id) ?? l.text;
+    ta.addEventListener('input', () => lessonDrafts.set(l.id, ta.value));
+    const row = el('div', 'appr-actions');
+    row.append(
+      btn('Duyệt bài học', 'primary', () => (lessonDrafts.delete(l.id), lessonAct(l.id, 'approve', { text: ta.value }))),
+      btn('Bỏ', '', () => lessonAct(l.id, 'reject')),
+    );
+    card.append(top, ta);
+    if (l.why) card.append(el('div', 'muted', `Từ: ${l.why}`));
+    card.append(row);
+    return card;
+  };
+  // a few at a time so the office stays in view; the rest one click away
+  const SHOW = 3;
+  for (const l of pending.slice(0, SHOW)) nodes.push(lessonCard(l));
+  if (pending.length > SHOW) {
+    const more = el('details', 'learn-sec');
+    more.dataset.k = 'more';
+    more.open = open.has('more');
+    more.append(el('summary', '', `Còn ${pending.length - SHOW} bài học chờ duyệt`));
+    for (const l of pending.slice(SHOW)) more.append(lessonCard(l));
+    nodes.push(more);
+  }
+  if (!pending.length) nodes.push(el('div', 'muted', 'Không có bài học nào chờ duyệt. Bài học mới xuất hiện khi bạn sửa nhiều bản nháp, bỏ qua vì phân tích sai, hoặc task bị mở lại.'));
+
+  const section = (k, title, fill) => {
+    const d = el('details', 'learn-sec');
+    d.dataset.k = k;
+    d.open = open.has(k);
+    d.append(el('summary', '', title));
+    fill(d);
+    nodes.push(d);
+  };
+  section('approved', `Bài học đã duyệt (${approved.length}): thêm vào prompt phân tích của đúng app`, (d) => {
+    for (const l of approved) {
+      const row = el('div', 'learn-row');
+      row.append(el('span', 'tag', l.app), el('span', 'learn-text', `${l.topic ? l.topic + ': ' : ''}${l.text}`), btn('Xoá', 'small', () => lessonAct(l.id, 'delete')));
+      d.append(row);
+    }
+  });
+  section('recent', `Phản hồi gần đây (${L.recent.length})`, (d) => {
+    for (const f of L.recent) {
+      const row = el('div', 'learn-row');
+      const [cls, label] = f.hasMine ? EDIT_LABEL[f.edit] ?? ['muted', f.edit] : ['muted', 'Chưa thấy comment của bạn'];
+      const bits = [
+        f.state === 'skipped' && `Bỏ qua${f.skipReason ? ': ' + (L.skipReasons[f.skipReason] ?? f.skipReason) : ''}`,
+        f.hasMine && f.similarity != null && `giống ${Math.round(f.similarity * 100)}%`,
+        f.reopened && 'bị mở lại',
+        f.laterOthers && `${f.laterOthers} comment sau đó`,
+        f.lesson === 'running' ? 'đang rút bài học…' : f.lesson === 'done' ? 'đã rút bài học' : f.lesson === 'failed' ? 'rút bài học lỗi' : null,
+        f.caseSaved && 'đã lưu case',
+      ].filter(Boolean).join(' · ');
+      row.append(taskLink(f.key), el('span', cls, label), el('span', 'muted learn-text', bits));
+      d.append(row);
+    }
+  });
+  section('cases', `Kho case (${L.casesCount}): phân tích lần sau đọc các case giống nhất trước`, (d) => {
+    for (const c of L.cases) {
+      const row = el('div', 'learn-row');
+      row.append(taskLink(c.key), el('span', 'tag', c.app ?? ''), el('span', 'learn-text', c.title ?? ''));
+      d.append(row);
+    }
+  });
+  body.replaceChildren(...nodes);
+}
+
+// ---- question tasks: each question, the direct answer, and whether an independent check confirmed it ----
+const VERDICT = { confirmed: ['ok', '✓ Đã kiểm chứng'], corrected: ['fix', '✎ Đã sửa khi kiểm chứng'], unsure: ['unsure', '? Chưa chắc'] };
+function questionsBlock(it, a) {
+  const box = el('div', 'appr-block');
+  const v = it.verify;
+  box.append(el('div', 'appr-block-head', `Câu hỏi (${a.questions.length})`));
+  if (v?.state === 'done') {
+    const parts = [v.confirmed && `${v.confirmed} đúng`, v.corrected && `${v.corrected} đã sửa`, v.unsure && `${v.unsure} chưa chắc`, v.missed?.length && `${v.missed.length} câu bị sót đã thêm`].filter(Boolean).join(' · ');
+    box.append(el('div', v.unsure || v.corrected ? 'appr-err' : 'appr-ok', `Kiểm chứng độc lập: ${parts}${v.costUsd ? ` · $${Number(v.costUsd).toFixed(2)}` : ''}`));
+  } else if (v?.state === 'failed') box.append(el('div', 'appr-err', `Chưa kiểm chứng được: ${v.error}. Câu trả lời dưới đây là bản soạn đầu.`));
+  a.questions.forEach((q, i) => {
+    const row = el('div', 'qa');
+    const verdict = VERDICT[q.verdict] ?? (q.verified === false ? VERDICT.unsure : null);
+    const head = el('div', 'qa-q', `${i + 1}. ${q.q ?? ''}`);
+    if (verdict) head.append(el('span', `qa-badge ${verdict[0]}`, verdict[1]));
+    row.append(head, el('div', 'qa-a', q.answer ?? ''));
+    if (q.note) row.append(el('div', 'muted', `Kiểm chứng: ${q.note}`));
+    if (q.evidence) row.append(el('div', 'qa-ev', `Căn cứ: ${q.evidence}`));
+    box.append(row);
+  });
+  return box;
+}
+
+// ---- try the fix on the storefront (local Chrome, nothing saved), then enable it in DevHub ----
+const TRIAL_STATE = {
+  running: ['muted', 'Đang thử trên store (Chrome riêng, chặn mọi request ghi)…'],
+  passed: ['appr-ok', 'Thử fix: ĐẠT'],
+  failed: ['appr-err', 'Thử fix: chưa đạt'],
+  'not-reproduced': ['appr-err', 'Thử fix: không tái hiện được lỗi'],
+  unknown: ['appr-err', 'Thử fix: không có kết quả'],
+};
+const LIVE_STATE = {
+  enabling: ['muted', 'Đang bỏ comment block trong DevHub…'],
+  checking: ['muted', 'Đã bật, đang kiểm tra store thật (đợi cache tối đa ~2 phút)…'],
+  reverting: ['appr-err', 'Code gây lỗi, đang comment lại block…'],
+  live: ['appr-ok', 'Code đang chạy trên store'],
+  'live-unverified': ['appr-err', 'Đã bật, chưa xác nhận được trên store'],
+  reverted: ['appr-err', 'Đã tắt lại (comment lại block)'],
+  failed: ['appr-err', 'Không bật được'],
+  unknown: ['appr-err', 'Không rõ trạng thái: xem DevHub'],
+};
+const trialDrafts = new Map(); // key → {path, check, ready}
+const armed = new Set(); // two-click "enable without a passed trial"
+// same as lib/claude.mjs blockCode: the code a commented block runs
+const blockCode = (block) => block.split('\n').slice(1, -1).map((l) => (l === '//' ? '' : l.replace(/^\/\/ /, ''))).join('\n');
+const shotUrl = (key, name, at) => `/api/pipeline/${key}/shot/${name}?t=${encodeURIComponent(at ?? '')}`;
+
+function shotFig(key, name, at, caption) {
+  const fig = el('figure', 'trial-shot');
+  const a = document.createElement('a');
+  a.href = shotUrl(key, name, at);
+  a.target = '_blank';
+  a.rel = 'noopener';
+  const img = document.createElement('img');
+  img.src = a.href;
+  img.alt = caption;
+  img.loading = 'lazy';
+  a.append(img);
+  fig.append(a, el('figcaption', '', caption));
+  return fig;
+}
+
+const checkText = (x) => (x == null ? '' : x.checkError ? `kiểm tra lỗi: ${x.checkError}` : `${x.check === true ? 'hết lỗi' : x.check === false ? 'còn lỗi' : `check=${JSON.stringify(x.check)}`}${x.errors ? ` · ${x.errors} lỗi console` : ''}${x.blocked ? ` · chặn ${x.blocked} request ghi` : ''}`);
+
+function trialBlock(it, a, currentCode) {
+  const box = el('div', 'trial');
+  const t = it.trial;
+  const d = it.devhub ?? {};
+  const test = a.devhub.test ?? {};
+  const draft = trialDrafts.get(it.key) ?? {};
+  box.append(el('div', 'appr-block-head', 'Thử fix trên store trước khi bật (không lưu gì)'));
+
+  // how the trial checks the bug: editable
+  const det = el('details', 'trial-spec');
+  det.open = !test.check;
+  det.append(el('summary', '', `Kiểm tra: ${test.path || '/'}${test.check ? ` → ${test.check}` : ' (chưa có biểu thức)'}`));
+  const field = (name, label, ph, mono) => {
+    const wrap = el('label', 'trial-field');
+    const inp = document.createElement('input');
+    inp.className = `appr-input${mono ? ' mono' : ''}`;
+    inp.placeholder = ph;
+    inp.value = draft[name] ?? test[name] ?? '';
+    inp.addEventListener('input', () => trialDrafts.set(it.key, { ...(trialDrafts.get(it.key) ?? {}), [name]: inp.value }));
+    wrap.append(el('span', 'muted', label), inp);
+    det.append(wrap);
+  };
+  field('path', 'Trang', '/products/handle', false);
+  field('check', 'Biểu thức (true = hết lỗi)', "getComputedStyle(document.querySelector('.price')).display !== 'none'", true);
+  field('ready', 'Chờ selector', '.product-form (tuỳ chọn)', true);
+  box.append(det);
+
+  if (t?.state) {
+    const [cls, label] = TRIAL_STATE[t.state] ?? ['muted', t.state];
+    box.append(el('div', cls, [label, t.note].filter(Boolean).join(': ')));
+    if (t.state !== 'running' && t.shots?.length) {
+      const row = el('div', 'trial-shots');
+      row.append(shotFig(it.key, 'trial-before.png', t.at, `Trước: ${checkText(t.before)}`));
+      if (t.shots.includes('trial-after.png')) row.append(shotFig(it.key, 'trial-after.png', t.at, `Sau khi chạy code: ${checkText(t.after)}`));
+      box.append(row);
+    }
+    if (t.newErrors?.length) box.append(el('pre', 'appr-pre', t.newErrors.join('\n')));
+    if (t.url) box.append(el('div', 'muted', `${t.url} · khách vãng lai, Chrome riêng không đăng nhập · code chạy sau khi trang tải xong`));
+    if (t.state !== 'running' && d.block && t.code !== blockCode(d.block)) box.append(el('div', 'appr-err', 'Lần thử này dùng code khác với code đang có trong DevHub: bấm Thử lại'));
+  }
+  const row = el('div', 'appr-actions');
+  if (t?.state !== 'running') {
+    row.append(btn(t ? 'Thử lại' : 'Thử fix', '', () => {
+      const dr = trialDrafts.get(it.key) ?? {};
+      act(`/${it.key}/trial`, { ...dr, code: currentCode() });
+    }));
+  }
+
+  // enable in DevHub: only once the commented block is there
+  const live = d.live;
+  if (d.state === 'written' && (!live || ['failed', 'reverted'].includes(live.state))) {
+    const passed = t?.state === 'passed';
+    if (passed && t.code === blockCode(d.block)) row.append(btn('Bật code trên store', 'primary', () => act(`/${it.key}/enable`, {})));
+    else {
+      const sure = armed.has(it.key);
+      const b = btn(sure ? 'Bấm lần nữa để bật dù chưa thử đạt' : 'Bật dù chưa thử đạt', sure ? 'danger' : '', () => {
+        if (!armed.has(it.key)) {
+          armed.add(it.key);
+          setTimeout(() => (armed.delete(it.key), renderApprovals(true)), 5000);
+          return renderApprovals(true);
+        }
+        armed.delete(it.key);
+        act(`/${it.key}/enable`, { force: true });
+      });
+      row.append(b);
+    }
+  }
+  if (row.childElementCount) box.append(row);
+  if (live?.state) {
+    const [cls, label] = LIVE_STATE[live.state] ?? ['muted', live.state];
+    box.append(el('div', cls, [label, live.note].filter(Boolean).join(': ')));
+    if (live.newErrors?.length) box.append(el('pre', 'appr-pre', live.newErrors.join('\n')));
+    if (live.shot) {
+      const r = el('div', 'trial-shots');
+      r.append(shotFig(it.key, 'live.png', live.at, 'Store thật sau khi bật'));
+      box.append(r);
+    }
+    const v = [live.version != null && `version ${live.version}`, live.previousVersion != null && `restore được version ${live.previousVersion}`].filter(Boolean).join(' · ');
+    if (v) box.append(el('div', 'muted', v));
+  }
+  return box;
+}
+
+// What the session could not do (refused tool calls) and the task images the app downloaded for it.
+function denialsBlock(denials, images, prefetch) {
+  const n = denials?.length ?? 0;
+  if (!n && !images && !prefetch) return null;
+  const box = el('div', 'appr-probe');
+  if (prefetch) box.append(el('div', 'appr-muted', `Đã đọc sẵn cho Claude: task, ${prefetch.comments ?? '?'} comment${prefetch.crisp != null ? `, ${prefetch.crisp} tin Crisp` : ''}`));
+  if (images) box.append(el('div', images.failed ? 'appr-warn' : 'appr-muted',
+    images.saved || images.failed ? `Ảnh task: đã tải ${images.saved}${images.failed ? `, lỗi ${images.failed}` : ''}` : 'Ảnh task: không có'));
+  if (n) {
+    const d = el('details', 'appr-denials');
+    d.append(el('summary', 'appr-warn', `⚠ ${n} thao tác bị chặn: kết quả có thể thiếu bằng chứng`));
+    for (const x of denials) d.append(el('div', 'appr-muted mono', `${x.tool}: ${x.input}`));
+    box.append(d);
+  }
+  return box;
+}
+
+// Ask Claude again in the same analysis session (read only); a changed conclusion updates the card above.
+function chatBlock(it) {
+  const box = el('div', 'appr-block appr-chat');
+  box.append(el('div', 'appr-block-head', 'Hỏi lại Claude về kết quả này'));
+  for (const m of it.chat ?? []) {
+    const row = el('div', `chat-msg chat-${m.role}`);
+    row.append(el('div', 'chat-who', m.role === 'user' ? `Bạn · ${clock(m.at)}` : m.role === 'error' ? `Lỗi · ${clock(m.at)}` : `Claude · ${clock(m.at)}${m.costUsd ? ` · $${Number(m.costUsd).toFixed(2)}` : ''}`));
+    row.append(el('div', 'chat-text', m.text || '(trống)'));
+    if (m.updated?.length) row.append(el('div', 'appr-ok', `Đã cập nhật: ${m.updated.map((f) => CHAT_FIELDS[f] ?? f).join(', ')}`));
+    const dn = denialsBlock(m.denials);
+    if (dn) row.append(dn);
+    box.append(row);
+  }
+  if (it.asking) {
+    const row = el('div', 'appr-actions');
+    row.append(el('span', 'muted', 'Claude đang kiểm tra lại…'), btn('Dừng', '', () => act(`/${it.key}/askstop`)));
+    box.append(row);
+    return box;
+  }
+  const ta = el('textarea', 'appr-text');
+  ta.rows = 2;
+  ta.dataset.keep = 'chat';
+  ta.placeholder = 'VD: Kiểm tra lại xem store có bật app embed không? / Solution này có ảnh hưởng tới Quick Order không? (Ctrl+Enter để gửi)';
+  ta.value = chatDrafts.get(it.key) ?? '';
+  const send = () => {
+    if (!ta.value.trim()) return;
+    chatDrafts.delete(it.key);
+    act(`/${it.key}/ask`, { text: ta.value });
+  };
+  ta.addEventListener('input', () => chatDrafts.set(it.key, ta.value));
+  ta.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) send();
+  });
+  const row = el('div', 'appr-actions');
+  row.append(btn('Gửi', 'primary', send), el('span', 'muted', 'Cùng phiên phân tích, chỉ đọc. Kết luận thay đổi thì thẻ này tự cập nhật (comment/code chưa gửi).'));
+  box.append(ta, row);
+  return box;
 }
 
 function renderApprovals(force = false) {
@@ -537,9 +912,12 @@ function renderApprovals(force = false) {
     let c = cardCache.get(it.key);
     if (force || !c || c.sig !== sig) {
       // keep what you typed and whether the report was open
-      const wasOpen = c?.node.querySelector('details')?.open;
+      const wasOpen = c?.node.querySelector('details.appr-report')?.open;
+      const focused = c?.node.contains(document.activeElement) ? document.activeElement.dataset.keep : null;
       c = { sig, node: approvalCard(it) };
-      if (wasOpen) c.node.querySelector('details').open = true;
+      const rep = c.node.querySelector('details.appr-report');
+      if (rep && wasOpen !== undefined) rep.open = wasOpen;
+      if (focused) queueMicrotask(() => c.node.querySelector(`[data-keep="${focused}"]`)?.focus());
       cardCache.set(it.key, c);
     }
     nodes.push(c.node);
@@ -592,7 +970,7 @@ function showToast(item, src) {
   }
   const queued = localPipeline().find((i) => i.key === item.task);
   if (item.type === 'assigned' && queued && ['queued', 'analyzing'].includes(queued.state) && src === sources.get('')) {
-    box.append(el('div', 'toast-meta', 'Đã tự chuyển In Progress và đang chạy /analyze-boss-task'));
+    box.append(el('div', 'toast-meta', 'Đang tự chạy /analyze-boss-task'));
   }
   if (item.type === 'assigned' && queued?.state === 'pending' && src === sources.get('')) {
     actions.prepend(btn('Duyệt phân tích', 'primary', () => {
@@ -654,6 +1032,30 @@ try {
 }
 
 // ---------- controls ----------
+// Auto-analysis of new tasks assigned to you (this machine's server only)
+let autoOn = null;
+function renderAuto(s) {
+  if (typeof s?.autoAnalyze !== 'boolean') return;
+  autoOn = s.autoAnalyze;
+  const b = $('#btn-auto');
+  b.hidden = false;
+  b.disabled = false;
+  b.setAttribute('aria-pressed', String(autoOn));
+  b.textContent = `Tự động phân tích: ${autoOn ? 'Bật' : 'Tắt'}`;
+}
+$('#btn-auto').addEventListener('click', async () => {
+  if (autoOn === null) return;
+  const b = $('#btn-auto');
+  b.disabled = true;
+  try {
+    const r = await fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ autoAnalyze: !autoOn }) });
+    if (!r.ok) throw new Error(await r.text() || `Lỗi ${r.status}`);
+    renderAuto(await r.json());
+  } catch (e) {
+    b.disabled = false;
+    alertLine(e.message);
+  }
+});
 $('#btn-poll').addEventListener('click', () => {
   for (const src of sources.values()) fetch(`${src.origin}/api/poll`, { method: 'POST' }).catch(() => {});
 });
@@ -719,6 +1121,8 @@ function connect(origin, machine) {
     src.sessions = new Map(d.sessions.map((s) => [s.id, s]));
     src.feed = d.feed;
     src.pipeline = d.pipeline ?? [];
+    src.learn = d.learn ?? null;
+    if (origin === '') renderAuto(d.settings);
     renderAll();
   });
   es.addEventListener('boss', (e) => {
@@ -736,6 +1140,11 @@ function connect(origin, machine) {
       renderAssigned();
       renderOffice();
     }
+  });
+  if (origin === '') es.addEventListener('settings', (e) => renderAuto(JSON.parse(e.data)));
+  es.addEventListener('learn', (e) => {
+    src.learn = JSON.parse(e.data);
+    if (origin === '') renderLearn();
   });
   es.addEventListener('session', (e) => {
     const s = JSON.parse(e.data);

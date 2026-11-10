@@ -127,7 +127,7 @@ export function createCity(k) {
       line(iso(x, 18.5), iso(x, 20.3));
     }
     // stadium on the left: running track around a pitch
-    ellipse(-10.5, 10.5, 4.8, 9.2, '#c4553f');
+   ellipse(-10.5, 10.5, 4.8, 9.2, '#c4553f');
     ellipse(-10.5, 10.5, 3.8, 8.0, '#5fa04e');
     poly(quad(-13.6, 4.2, -7.4, 16.8), '#6ab257');
     g().strokeStyle = 'rgba(255,255,255,0.85)';
@@ -135,6 +135,31 @@ export function createCity(k) {
     poly(quad(-13.6, 4.2, -7.4, 16.8), null, 'rgba(255,255,255,0.85)', 1.5);
     line(iso(-13.6, 10.5), iso(-7.4, 10.5));
     ellipse(-10.5, 10.5, 1.2, 1.2, null, 'rgba(255,255,255,0.85)');
+
+    // stadium crowd: people around the pitch and stands
+    const stadiumCrowd = [
+      { x: -12.2, y: 8.8, shirt: '#d9534f', seed: 'stadium-a1' },
+      { x: -11.5, y: 6.8, shirt: '#4d8fe8', seed: 'stadium-a2' },
+      { x: -10.6, y: 5.9, shirt: '#f0ad4e', seed: 'stadium-a3' },
+      { x: -9.0, y: 6.8, shirt: '#5cb85c', seed: 'stadium-a4' },
+      { x: -8.2, y: 8.7, shirt: '#8e6cc9', seed: 'stadium-a5' },
+      { x: -12.1, y: 12.5, shirt: '#e07a5f', seed: 'stadium-b1' },
+      { x: -10.5, y: 13.5, shirt: '#81b29a', seed: 'stadium-b2' },
+      { x: -9.0, y: 12.8, shirt: '#f2cc8f', seed: 'stadium-b3' },
+      { x: -8.1, y: 10.8, shirt: '#b56576', seed: 'stadium-b4' },
+      { x: -13.4, y: 10.5, shirt: '#6d597a', seed: 'stadium-c1' },
+      { x: -7.5, y: 10.5, shirt: '#457b9d', seed: 'stadium-c2' },
+    ];
+    stadiumCrowd.forEach((p) => {
+      add(p.x + p.y, () => k.person(iso(p.x, p.y), {
+        shirt: p.shirt,
+        seed: p.seed,
+        t: k.time(),
+        scale: 0.62,
+        walking: true,
+      }), p.x, p.y);
+    });
+
     // school yard
     poly(quad(-16, 27, -6, 36.5), '#d9cbb0');
     poly(quad(-15, 31, -11, 36), '#4f8fc0');
