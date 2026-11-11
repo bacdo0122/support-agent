@@ -48,6 +48,7 @@
           <h2>Hàng đợi duyệt</h2>
           <p class="muted" id="appr-note"></p>
         </div>
+        <div id="appr-decide" class="appr-decide" hidden></div>
         <div id="appr-list" class="appr-list"></div>
       </div>
 
@@ -87,7 +88,7 @@
           <span><i class="lg waiting"></i>Chờ duyệt</span>
           <span><i class="lg idle"></i>Phòng nghỉ = xong lượt, chờ bạn</span>
           <span><i class="lg queue"></i>Khách xếp hàng = task Todo</span>
-          <span><i class="lg working"></i>Agent = task trong hàng đợi duyệt (ra về khi xong / bỏ qua)</span>
+          <span><i class="lg working"></i>Nhân viên ngồi bàn riêng · hồ sơ vàng = task (bay sang vai kế tiếp, lên bàn giám đốc khi chờ bạn duyệt)</span>
           <span class="hint-drag">Kéo để di chuyển · cuộn để phóng to</span>
         </div>
         <div class="popover" id="popover" hidden></div>
@@ -141,6 +142,7 @@
       </div>
     </section>
 
+    <div class="side">
     <aside class="panel feed">
       <div class="panel-head">
         <h2>Hoạt động</h2>
@@ -153,6 +155,18 @@
       </div>
       <ol id="feed-list" class="feed-list"></ol>
     </aside>
+
+    <aside class="panel team" id="team-panel">
+      <div class="panel-head row">
+        <h2>Phòng ban</h2>
+        <p class="muted" id="team-note"></p>
+      </div>
+      <h3 class="team-sub">Chờ bạn cấp quyền / quyết <span id="n-ask" class="badge" hidden>0</span></h3>
+      <div id="team-ask" class="team-ask"></div>
+      <h3 class="team-sub">Nhân viên</h3>
+      <ul id="team-staff" class="team-staff"></ul>
+    </aside>
+    </div>
   </main>
 
   <div class="toasts" id="toasts" aria-live="polite"></div>

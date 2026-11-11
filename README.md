@@ -115,6 +115,25 @@ node --env-file=.env scripts/eval.mjs --dry             # chỉ xem sẽ chấm 
 - Một phiên Claude khác chấm theo ý (không theo câu chữ) so với comment thật: nguyên nhân, cách xử lý, từng câu hỏi, chi tiết bịa, ý bỏ sót, kết luận **duyệt được / sửa nhẹ / sai**, điểm 0–10.
 - In bảng theo loại task, gồm số ca "sai mà tự tin cao" (thứ sẽ lọt qua nếu tự duyệt theo độ tự tin). Kết quả lưu `data/eval/<run>.json`. Chỉ đọc: không ghi BOSS, DevHub hay store. Lưu ý: code đọc là `origin/master` hiện tại, có thể đã có fix của chính task đó.
 
+## Phòng ban: mỗi task qua nhiều nhân viên (lib/office.mjs)
+
+Mặc định (`OFFICE=1`) phân tích một task không còn là một phiên Claude duy nhất mà là các vai nối tiếp, mỗi vai một phiên riêng, model và quyền riêng, cùng làm trên một **hồ sơ** `data/cases/<TASK-ID>/`:
+
+| Vai | Model | Làm gì | Ghi vào hồ sơ |
+|---|---|---|---|
+| Thư ký hồ sơ | code | Task, comment, Crisp, ảnh server đã đọc sẵn | `task.md` |
+| Lễ tân | Haiku, không tool | Phân loại, liên app, thông tin thiếu | `intake.json` |
+| Thủ thư | Sonnet, không tool | Chọn tiền lệ (≤5 trong 12 ứng viên) và bài học (≤12 trong 40) thật sự khớp, nêu giả thuyết cần kiểm trước | `precedents.md` |
+| Chuyên gia <app> | Opus | `/analyze-boss-task` + **gói kiến thức của đúng app** (`knowledge/apps/<App>.md`) + bản đồ tính năng | `report.md`, `analysis.json` |
+| Kiểm định | Opus | Tự kiểm từng khẳng định (nguyên nhân, cơ chế, tên setting, câu trả lời, code DevHub) bằng nguồn tự mở; sửa hoặc đánh "chưa chắc / sai" | `review.json` |
+| Biên tập | Sonnet, không tool | Viết comment 4 mục từ kết luận đã kiểm định, theo giọng các comment bạn đã đăng; sai template thì viết lại 1 lần | `comment.md` |
+
+- Bàn giao giữa các vai: `messages.jsonl`; việc tự quyết khi một vai lỗi (Thủ thư lỗi → dùng tiền lệ theo từ khoá; Kiểm định lỗi → hạ tin cậy tối đa medium; Biên tập không đạt → giữ comment của chuyên gia): `decisions.jsonl`. Kết luận cuối: `analysis.final.json`.
+- Kiểm định thay cho bước kiểm chứng câu hỏi cũ và áp cho mọi loại task; "sai" thì tin cậy về low.
+- Thẻ task có khối **Phòng ban xử lý**: từng vai, model, trạng thái, thời gian, chi phí, các khẳng định kiểm định chưa xác nhận.
+- Không vai nào ghi ra ngoài: comment, DevHub, status vẫn chờ bạn duyệt như trước. `OFFICE=0` để quay về một phiên.
+- Chấm mù dùng cùng luồng; `--office 0` chấm luồng cũ để so sánh, `--app Solution` chỉ lấy task của một app.
+
 ## Hooks
 
 Đã khai báo trong `~/.claude/settings.json` cho SessionStart, UserPromptSubmit, PreToolUse, PostToolUse, Notification, Stop, SubagentStop, SessionEnd:
@@ -136,6 +155,37 @@ Tab "Văn phòng" (`public/office.js`, canvas, không dùng thư viện): mỗi 
 Mỗi task trong "Hàng đợi duyệt" là một agent: đi vào từ cửa cuối hành lang, tới ngồi ở phòng của app task đó (không rõ app thì phòng chung), làm việc khi đang chuyển status / phân tích / gửi comment / ghi DevHub, giơ bong bóng "Chờ duyệt" khi cần bạn (duyệt solution, lỗi), và đi ra cửa khi task được bấm Xong hoặc Bỏ qua. Bấm vào agent → "Xem trong hàng đợi".
 
 Toà nhà còn có căn tin (phiên rảnh ngồi ăn khi sofa đã kín) và phòng giám đốc: giám đốc là bạn, nhãn trên đầu cho biết có bao nhiêu phiên đang chờ bạn duyệt. Khu phố xung quanh (`public/city.js`) gồm 4 con đường với ngã tư, đèn giao thông, vạch qua đường, các toà nhà, dãy cửa hàng, bãi đỗ xe, công viên có hồ và đài phun nước, xe cộ (buýt, ô tô, taxi, xe tải, van, cảnh sát, cấp cứu, xe máy, xe đạp) và người đi bộ. Thu nhỏ dưới 65% thì chỉ còn nhãn của phiên chờ duyệt và giám đốc.
+
+### Trao đổi giữa các vai, ngân sách, "Cần bạn quyết"
+
+- **Lễ tân** (Haiku, không tool) đọc hồ sơ trước Thủ thư: loại task, app liên quan, task có liên app không, thông tin còn thiếu (`intake.json`). Chuyên gia nhận phân loại này làm gợi ý.
+- **Hỏi chéo**: chuyên gia ghi `askOtherApp` (tối đa 2 câu) khi cần biết chắc về app khác → chuyên gia app đó (gói kiến thức của app đó, chỉ đọc) trả lời → chuyên gia chính cập nhật kết luận **trong cùng phiên** (`consults.json`).
+- **Kiểm định trả hồ sơ**: kết luận bị đánh "sai" → chuyên gia làm lại 1 lần trong cùng phiên với các điểm kiểm định nêu → kiểm định lần 2. Vẫn sai thì đưa lên bạn.
+- **Ngân sách mỗi task** `OFFICE_BUDGET_USD` (mặc định 6): đã tiêu quá thì bỏ qua hỏi chéo / làm lại / kiểm định lần 2 và đưa lên bạn.
+- **Cần bạn quyết** (đầu Hàng đợi duyệt): một danh sách mọi việc chờ bạn: duyệt phân tích, duyệt solution/comment, bật code DevHub, lỗi, và những gì văn phòng đẩy lên (ngân sách, liên app chưa hỏi được, kiểm định sai/chưa kiểm, thiếu thông tin). Bấm một dòng để tới thẻ task. Các việc đẩy lên cũng nằm trong `escalations.json` của hồ sơ.
+
+### Card "Phòng ban" (cột phải) và tiến trình trực tiếp
+
+- Các phiên có dùng tool (Chuyên gia, hỏi chéo, Kiểm định, làm lại) chạy `claude -p --output-format stream-json --verbose`: mỗi lần gọi tool (cả của trợ lý con, đánh dấu ↳) được báo ngay, server gom cập nhật tối đa 1 lần/giây. Kết quả cuối, chi phí, session, thao tác bị chặn đọc từ dòng `result` như trước. Vai không dùng tool vẫn chạy `--output-format json`.
+- Card **Phòng ban** dưới card Hoạt động: **Chờ bạn cấp quyền / quyết** (duyệt, lỗi, việc văn phòng đẩy lên, và phiên Claude Code đang chờ bạn cho phép qua hooks) và **Nhân viên**: ai đang làm task nào, đã chạy bao lâu, bao nhiêu lần gọi tool, việc vừa làm, mở rộng để xem 10 việc gần nhất. Nhãn trên đầu nhân viên trong văn phòng cũng là việc vừa làm thật.
+
+### Văn phòng theo phòng ban (khi `OFFICE` bật)
+
+- Mỗi phòng app (Solution, Quote, Lock) có **Chuyên gia** ngồi bàn đầu; **Sảnh nghiệp vụ** (phòng chung cũ) có Thư ký hồ sơ, Thủ thư, Kiểm định, Biên tập. Nhân viên luôn ngồi bàn riêng, màn hình sáng và gõ phím khi có hồ sơ; nhãn trên đầu là tên vai và model.
+- Mỗi task trong hàng đợi là một **tập hồ sơ vàng** (đỏ = Urgent) nằm trên bàn của vai đang xử lý, **bay** sang bàn vai kế tiếp khi bàn giao; việc cần bạn (chờ duyệt phân tích, chờ duyệt solution, lỗi) thì hồ sơ chồng trên **bàn giám đốc** và nhãn giám đốc đếm số việc chờ bạn. Phóng to ≥130% để thấy mã task trên hồ sơ.
+- Vai vừa xong việc nói **bong bóng** với vai kế tiếp trong 8 giây (vd "#5562 → Kiểm định: question · tin cậy high").
+- Bấm vào nhân viên: vai trò, model, hồ sơ đang giữ, nút "Xem trong hàng đợi".
+- Sau khi duyệt: thử fix, hỏi lại, ghi/bật DevHub là việc của Chuyên gia app; đăng comment là việc của Biên tập.
+- **Demo** cho thuyết trình: mở `http://<máy>:4317/?demo=1`: 3 hồ sơ giả (Solution, Lock, Quote) chạy vòng qua các vai, chỉ vẽ trong văn phòng, không chạy Claude, không gửi gì.
+
+## Dùng từ máy khác trong cùng mạng LAN
+
+`.env`: `HOST=0.0.0.0` và `LAN_KEY=<mã truy cập>`. Máy khác mở `http://<IP máy chạy app>:4317`, nhập mã một lần (cookie giữ 90 ngày), sau đó xem, duyệt và thao tác như trên máy này.
+- Không có cookie đúng thì mọi trang/API trả 401/403; thao tác chỉ nhận từ chính trang app (kiểm tra `Host` là IP/tên của máy, `Origin` cùng trang, JSON).
+- `POST /hooks` (sự kiện Claude Code): máy chạy app gửi tự do; máy khác trong LAN phải kèm khoá hook (`X-Hook-Key`, server in ra khi khởi động, sinh từ `LAN_KEY`; khoá này chỉ gửi được sự kiện, không mở được trang). Cài trên máy khác (cần Node):
+  `curl -s -o install-hooks.mjs http://<IP>:4317/install-hooks.mjs && node install-hooks.mjs --url http://<IP>:4317 --key <khoá hook> --name "<tên máy>"`
+  Phiên của máy đó hiện trong app dạng `<thư mục> (<tên máy>)`. Gỡ: `node install-hooks.mjs --remove`.
+- Đổi `LAN_KEY` rồi khởi động lại để đăng xuất mọi máy khác. `HOST=127.0.0.1` để đóng lại. Thêm tên máy (vd `may-nha.local`) vào `LAN_HOSTS` nếu muốn mở bằng tên thay vì IP.
 
 ## Xem từ nhiều máy (nhà + công ty) qua Tailscale
 

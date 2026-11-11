@@ -1,3 +1,4 @@
+[hidden] { display: none !important; }
 /* Night-shift support desk: dark slate, one warm amber for "needs you", app colors as identity only. */
 :root {
   --bg: #12151b;
@@ -55,13 +56,17 @@ a { color: inherit; }
 /* the "Phiên Claude Code" panel is hidden (no hooks installed): the approval queue gets its width */
 .layout { display: grid; grid-template-columns: minmax(0, 1fr) minmax(360px, 35%); gap: 16px; padding: 16px 20px; align-items: start; }
 .layout > .sessions { display: none; }
-@media (max-width: 1200px) { .layout { grid-template-columns: minmax(0, 1fr); } .feed { grid-column: 1 / -1; } }
+@media (max-width: 1200px) { .layout { grid-template-columns: minmax(0, 1fr); } .side { grid-column: 1 / -1; } }
 @media (max-width: 760px) { .layout { grid-template-columns: 1fr; padding: 12px 16px; } }
 .panel { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 14px; min-width: 0; }
 .panel-head { display: grid; gap: 6px; margin-bottom: 12px; }
 .panel-head.row { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; flex-wrap: wrap; }
-.sessions, .feed { position: sticky; top: 16px; max-height: calc(100vh - 100px); overflow: auto; }
-@media (max-width: 1200px) { .feed { position: static; max-height: none; } }
+.sessions { position: sticky; top: 16px; max-height: calc(100vh - 100px); overflow: auto; }
+/* right column: a small activity feed, then the office staff and what waits for you */
+.side { position: sticky; top: 16px; display: grid; gap: 16px; align-content: start; max-height: calc(100vh - 32px); min-width: 0; }
+.side .feed { max-height: 34vh; overflow: auto; }
+.side .team { max-height: calc(66vh - 64px); overflow: auto; }
+@media (max-width: 1200px) { .side { position: static; max-height: none; } .side .feed, .side .team { max-height: 50vh; } }
 @media (max-width: 760px) { .sessions { position: static; max-height: none; } }
 
 /* sessions */
@@ -79,8 +84,8 @@ a { color: inherit; }
 .sess-top { display: flex; align-items: center; gap: 8px; }
 .sess-name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sess-time { margin-left: auto; font-family: var(--mono); font-size: 11px; color: var(--muted); white-space: nowrap; }
-.sess .dot.working { background: var(--green); box-shadow: 0 0 0 3px color-mix(in srgb, var(--green) 25%, transparent); }
-.sess .dot.waiting { background: var(--amber); }
+.sess .dot.working, .team .dot.working { background: var(--green); box-shadow: 0 0 0 3px color-mix(in srgb, var(--green) 25%, transparent); }
+.sess .dot.waiting, .team .dot.waiting { background: var(--amber); }
 .sess .dot.idle { background: var(--muted); }
 .sess-task { display: flex; gap: 6px; flex-wrap: wrap; font-size: 12px; }
 .sess-action { font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
@@ -161,9 +166,11 @@ a.tag:hover { border-color: var(--muted); }
 .lg.queue { background: #5d6678; }
 .popover { position: absolute; z-index: 3; width: min(300px, calc(100% - 16px)); background: var(--panel-2); border: 1px solid var(--line); border-radius: 10px;
   box-shadow: 0 10px 30px rgba(0,0,0,.45); padding: 12px; display: grid; gap: 6px; font-size: 13px; }
+.popover[hidden] { display: none; }
 .popover .pop-head { display: flex; align-items: center; gap: 8px; }
 .popover .pop-name { font-weight: 600; overflow-wrap: anywhere; }
-.popover .pop-close { margin-left: auto; background: transparent; border: 0; color: var(--muted); font-size: 16px; line-height: 1; padding: 2px 4px; }
+.popover .pop-close { margin-left: auto; background: transparent; border: 0; border-radius: 6px; color: var(--muted); font-size: 20px; line-height: 1; min-width: 32px; min-height: 32px; padding: 4px 8px; cursor: pointer; }
+.popover .pop-close:hover { background: var(--line); color: var(--fg); }
 .popover .pop-row { color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
 .popover .pop-row b { color: var(--fg); font-weight: 500; }
 
@@ -282,3 +289,46 @@ td button.small { font-size: 12px; padding: 2px 8px; }
 .appr-denials summary { cursor: pointer; }
 .toggle[aria-pressed="true"] { border-color: var(--green); color: var(--green); }
 .toggle[aria-pressed="false"] { opacity: .8; }
+
+.appr-office .office-step { display: grid; grid-template-columns: minmax(110px, auto) 60px 70px 1fr; gap: 8px; align-items: baseline; font-size: 13px; padding: 2px 0; }
+.appr-office .office-role { font-weight: 600; }
+.appr-office .office-model { opacity: .7; font-family: ui-monospace, monospace; font-size: 12px; }
+.appr-office .office-claims { margin: 6px 0 0; padding-left: 18px; font-size: 13px; }
+@media (max-width: 600px) { .appr-office .office-step { grid-template-columns: 1fr 1fr; } }
+
+.appr-decide { border: 1px solid var(--amber, #f0a92e); border-radius: 10px; padding: 10px 12px; margin-bottom: 12px; display: grid; gap: 6px; }
+.appr-decide .decide-row { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 2px 10px; text-align: left; background: transparent; border: 0; border-top: 1px solid var(--line); padding: 6px 0 2px; color: inherit; cursor: pointer; font: inherit; }
+.appr-decide .decide-row:first-of-type { border-top: 0; }
+.appr-decide .decide-row:hover .decide-title { text-decoration: underline; }
+.appr-decide .decide-key { font-family: ui-monospace, monospace; font-size: 12px; color: var(--muted); }
+.appr-decide .decide-title { font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.appr-decide .decide-why { grid-column: 2; display: flex; flex-wrap: wrap; gap: 4px 8px; align-items: baseline; font-size: 12px; color: var(--muted); }
+.appr-decide .decide-chip { font-size: 11px; font-weight: 600; padding: 1px 7px; border-radius: 999px; background: rgba(53,179,122,.18); color: #35b37a; }
+.appr-decide .decide-chip.warn { background: rgba(240,169,46,.18); color: #f0a92e; }
+.appr-office .office-consult { border-left: 3px solid var(--line); padding-left: 8px; font-size: 13px; }
+
+.team .team-sub { font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin: 10px 0 6px; display: flex; align-items: center; gap: 6px; }
+.team .team-ask { display: grid; gap: 6px; }
+.team .team-ask-row { display: grid; grid-template-columns: auto auto minmax(0, 1fr); gap: 2px 8px; align-items: baseline; text-align: left; background: var(--panel-2); border: 1px solid var(--line); border-radius: 8px; padding: 7px 9px; color: inherit; font: inherit; cursor: pointer; }
+.team .team-ask-row:hover { border-color: #f0a92e; }
+.team .team-ask-key { font-family: ui-monospace, monospace; font-size: 11px; color: var(--muted); }
+.team .team-ask-title { font-size: 13px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.team .team-ask-text { grid-column: 1 / -1; font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
+.team .team-staff { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; }
+.team .team-member { padding: 6px 8px; border-radius: 8px; border: 1px solid transparent; }
+.team .team-member.working { background: var(--panel-2); border-color: var(--line); }
+.team .team-member.clickable { cursor: pointer; }
+.team .team-member.clickable:hover { border-color: #35b37a; }
+.team .team-head { display: flex; align-items: center; gap: 8px; }
+.team .team-name { font-weight: 600; font-size: 13px; }
+.team .team-model { font-family: ui-monospace, monospace; font-size: 11px; color: var(--muted); }
+.team .team-files { margin-left: auto; font-size: 11px; color: #f2c14e; }
+.team .team-what { font-size: 12px; margin: 2px 0 0 16px; overflow-wrap: anywhere; }
+
+.team .team-meta { color: var(--muted); font-variant-numeric: tabular-nums; }
+.team .team-now { font-size: 12px; margin: 2px 0 0 16px; font-family: ui-monospace, monospace; color: #9fd8bd; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.team .team-log { margin: 2px 0 0 16px; font-size: 12px; }
+.team .team-log summary { cursor: pointer; color: var(--muted); }
+.team .team-log ol { list-style: none; margin: 4px 0 0; padding: 0; display: grid; gap: 2px; font-family: ui-monospace, monospace; font-size: 11px; }
+.team .team-log li { overflow-wrap: anywhere; }
+.team .team-ago { color: var(--muted); margin-right: 6px; }

@@ -1,6 +1,7 @@
 import { createServer } from 'node:http';
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
-import { hostname } from 'node:os';
+import { hostname, networkInterfaces } from 'node:os';
+import { createHmac, timingSafeEqual } from 'node:crypto';
 import { dirname, extname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createBossClient } from './lib/boss.mjs';
@@ -9,7 +10,7 @@ import { createClaudeRunner, LOGS } from './lib/claude.mjs';
 import { createPipeline } from './lib/pipeline.mjs';
 import { createLearning } from './lib/learn.mjs';
 import { createTeamCases } from './lib/teamcases.mjs';
-import { createModuleMap } from './lib/knowledge.mjs';
+import { createModuleMap, createPacks } from './lib/knowledge.mjs';
 import { richText } from './lib/taskdata.mjs';
 import { createPoller } from './lib/poller.mjs';
 import { createSessions } from './lib/sessions.mjs';
@@ -54,6 +55,7 @@ const learn = createLearning({
 });
 // the team's Resolved tasks with the TS answer: closest precedents go into every analysis; synced every 6 h
 const moduleMap = createModuleMap();
+const packs = createPacks();
 const teamCases = createTeamCases({ dir: join(ROOT, 'data'), client, log: (m) => console.log(m) });
 const pipeline = createPipeline({
   statePath: join(ROOT, 'data', 'pipeline.json'),
@@ -67,6 +69,8 @@ const pipeline = createPipeline({
       + teamCases.context({ title: it.title, text: richText(o.text ?? ''), app: it.app, exclude: [it.key] })
       + moduleMap.note({ app: it.app, title: it.title }),
   },
+  // several staff per task (Thủ thư → Chuyên gia → Kiểm định → Biên tập), case folders in data/cases; OFFICE=0 = one session as before
+  office: process.env.OFFICE === '0' ? null : { sources: { teamCases, learn, packs, moduleMap }, caseRoot: join(ROOT, 'data', 'cases'), budgetUsd: Number(process.env.OFFICE_BUDGET_USD) || 6 },
   onChange: (items) => bus.broadcast('pipeline', items),
   autoAnalyze: process.env.AUTO_ANALYZE !== '0',
   logsDir: process.env.AUTOFIX_LOGS_DIR || LOGS,
@@ -90,7 +94,7 @@ const sessions = createSessions({ bus, onChange: (s) => bus.broadcast('session',
 
 // Settings switched from the page, kept across restarts (data/settings.json). autoAnalyze: AUTO_ANALYZE is only the default.
 const SETTINGS_FILE = join(ROOT, 'data', 'settings.json');
-const settings = () => ({ autoAnalyze: pipeline.autoAnalyzeOn() });
+const settings = () => ({ autoAnalyze: pipeline.autoAnalyzeOn(), office: process.env.OFFICE !== '0' });
 async function loadSettings() {
   const s = JSON.parse(await readFile(SETTINGS_FILE, 'utf8').catch(() => '{}'));
   if (typeof s.autoAnalyze === 'boolean') pipeline.setAutoAnalyze(s.autoAnalyze);
@@ -103,11 +107,29 @@ async function saveSettings() {
 
 const snapshot = () => ({ settings: settings(), machine: MACHINE, boss: poller.boss, sessions: sessions.list(), pipeline: pipeline.list(), learn: { ...learn.state(), teamCases: teamCases.stats(), moduleMap: moduleMap.state() } });
 
+// ---- LAN access (HOST=0.0.0.0 + LAN_KEY): other machines on the network sign in with the key, then see and act as here.
+const LAN_KEY = process.env.LAN_KEY || '';
+const loopback = (req) => /^(127\.|::1$|::ffff:127\.)/.test(req.socket.remoteAddress ?? '');
+// Host names this server answers to (a page on another name, e.g. DNS rebinding, gets nothing).
+const OWN_HOSTS = new Set(['127.0.0.1', 'localhost', ...Object.values(networkInterfaces()).flat().filter((i) => i && i.family === 'IPv4').map((i) => i.address),
+  ...list(process.env.LAN_HOSTS)].map((h) => `${h}:${PORT}`));
+const COOKIE = 'so_key';
+const keyToken = () => createHmac('sha256', LAN_KEY).update('support-office').digest('hex');
+const cookieOf = (req) => String(req.headers.cookie ?? '').split(/;\s*/).find((c) => c.startsWith(`${COOKIE}=`))?.slice(COOKIE.length + 1) ?? '';
+const same = (a, b) => a.length === b.length && timingSafeEqual(Buffer.from(a), Buffer.from(b));
+// This machine always; another machine only with the signed-in cookie (and never through a proxy).
+const allowed = (req) => !viaProxy(req) && OWN_HOSTS.has(String(req.headers.host)) && (loopback(req) || (LAN_KEY && same(cookieOf(req), keyToken())));
+const LOGIN_PAGE = (msg = '') => `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Phòng Support</title>
+<style>body{font:15px system-ui;background:#111;color:#eee;display:grid;place-items:center;min-height:100vh;margin:0}form{display:grid;gap:10px;width:min(320px,90vw)}input,button{font:inherit;padding:10px;border-radius:8px;border:1px solid #444;background:#1c1c1c;color:#eee}button{background:#eee;color:#111;cursor:pointer}p{color:#f88;margin:0}</style>
+<form method="post" action="/login"><h2>Phòng Support</h2>${msg ? `<p>${msg}</p>` : ''}<input name="key" type="password" placeholder="Mã truy cập" autofocus required><button>Vào</button></form>`;
+let loginFails = 0;
+// Key that only lets another machine send Claude Code hook events (not open the app): derived from LAN_KEY.
+const HOOK_KEY = LAN_KEY ? createHmac('sha256', LAN_KEY).update('hooks').digest('hex').slice(0, 32) : '';
+
 // Pipeline actions run Claude and write to BOSS: only this app's own page may call them (no form posts from other sites).
 const trustedAction = (req) => {
   const origin = req.headers.origin;
-  return !viaProxy(req) && origin && new Set([`http://127.0.0.1:${PORT}`, `http://localhost:${PORT}`]).has(origin)
-    && String(req.headers['content-type']).startsWith('application/json');
+  return allowed(req) && origin === `http://${req.headers.host}` && String(req.headers['content-type']).startsWith('application/json');
 };
 
 async function pipelineAction(req, res, key, action) {
@@ -171,15 +193,40 @@ const server = createServer(async (req, res) => {
   const { pathname } = new URL(req.url, `http://${req.headers.host}`);
   try {
     if (req.method === 'POST' && pathname === '/hooks') {
-      if (viaProxy(req)) return res.writeHead(403).end();
+      // this machine; another LAN machine only with the hook key (scripts/install-hooks.mjs --url … --key …)
+      const lanHook = !loopback(req) && HOOK_KEY && same(String(req.headers['x-hook-key'] ?? ''), HOOK_KEY);
+      if (viaProxy(req) || !(loopback(req) || lanHook)) return res.writeHead(403).end();
       const body = await readBody(req, MAX_HOOK_BODY);
       res.writeHead(204).end();
       try {
-        sessions.handle(JSON.parse(body));
+        const from = lanHook ? (() => { try { return decodeURIComponent(String(req.headers['x-hook-machine'] ?? '')); } catch { return ''; } })().replace(/[^\p{L}\p{N} ._-]/gu, '').slice(0, 40) || req.socket.remoteAddress.replace(/^::ffff:/, '') : null;
+        sessions.handle(JSON.parse(body), { from });
       } catch {
         // a malformed hook payload must never break anything
       }
       return;
+    }
+    if (req.method === 'POST' && pathname === '/login' && LAN_KEY && !viaProxy(req)) {
+      const key = new URLSearchParams(await readBody(req, 4096)).get('key') ?? '';
+      if (loginFails > 20) return res.writeHead(429, { 'Content-Type': 'text/html; charset=utf-8' }).end(LOGIN_PAGE('Sai quá nhiều lần, khởi động lại server để thử tiếp'));
+      if (!same(createHmac('sha256', key).update('x').digest('hex'), createHmac('sha256', LAN_KEY).update('x').digest('hex'))) {
+        loginFails++;
+        return res.writeHead(401, { 'Content-Type': 'text/html; charset=utf-8' }).end(LOGIN_PAGE('Sai mã truy cập'));
+      }
+      loginFails = 0;
+      return res.writeHead(303, { Location: '/', 'Set-Cookie': `${COOKIE}=${keyToken()}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${90 * 86400}` }).end();
+    }
+    // reads through tailscale serve (only your tailnet reaches it) stay open as before: the other machine's page reads this one
+    const tailnetRead = req.method === 'GET' && Boolean(req.headers['tailscale-user-login']);
+    // the hook installer holds no secret: another machine downloads it before it has the key
+    if (req.method === 'GET' && pathname === '/install-hooks.mjs' && OWN_HOSTS.has(String(req.headers.host))) {
+      return res.writeHead(200, { 'Content-Type': 'text/javascript; charset=utf-8' }).end(await readFile(join(ROOT, 'scripts', 'install-hooks.mjs')));
+    }
+    if (!allowed(req) && !tailnetRead) {
+      if (req.method === 'GET' && (pathname === '/' || pathname === '/index.html') && LAN_KEY && OWN_HOSTS.has(String(req.headers.host)) && !viaProxy(req)) {
+        return res.writeHead(401, { 'Content-Type': 'text/html; charset=utf-8' }).end(LOGIN_PAGE());
+      }
+      return res.writeHead(403, { 'Content-Type': 'text/plain; charset=utf-8' }).end('Cần đăng nhập');
     }
     if (req.method === 'GET' && pathname === '/events') return bus.attach(req, res, snapshot, cors(req));
     if (req.method === 'GET' && pathname === '/api/state') {
@@ -235,6 +282,7 @@ const server = createServer(async (req, res) => {
 
 server.listen(PORT, HOST, () => {
   console.log(`Support Office "${MACHINE}": http://${HOST}:${PORT}${PEERS.length ? ` · peers: ${PEERS.join(', ')}` : ''}`);
+  if (HOOK_KEY && HOST !== '127.0.0.1') console.log(`Hook từ máy khác: node install-hooks.mjs --url http://<IP máy này>:${PORT} --key ${HOOK_KEY}`);
   if (!client) console.log('BOSS_TOKEN chưa có trong .env: chỉ nhận sự kiện Claude Code, chưa tải hàng đợi BOSS.');
   Promise.all([pipeline.load(), learn.load(), teamCases.load(), loadSettings().catch(() => {})]).then(() => {
     poller.start();

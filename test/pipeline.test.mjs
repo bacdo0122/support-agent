@@ -567,3 +567,36 @@ test('auto analysis can be switched off: a new task then waits for approval', as
   await new Promise((r) => setTimeout(r, 50));
   assert.equal(runs, 0);
 });
+
+test('claude runner in stream mode reports each tool call live and still reads the final result', async () => {
+  let seen;
+  const events = [];
+  const spawnImpl = (bin, args) => {
+    seen = args;
+    const child = new EventEmitter();
+    child.stdout = new EventEmitter();
+    child.stderr = new EventEmitter();
+    child.kill = () => {};
+    const lines = [
+      { type: 'system', subtype: 'init' },
+      { type: 'assistant', message: { content: [{ type: 'text', text: 'x' }, { type: 'tool_use', name: 'Read', input: { file_path: '/a/price.ts' } }] } },
+      { type: 'assistant', parent_tool_use_id: 't1', message: { content: [{ type: 'tool_use', name: 'Bash', input: { command: 'git log -1' } }] } },
+      { type: 'result', result: 'xong', session_id: 's2', total_cost_usd: 0.7, is_error: false, permission_denials: [{ tool_name: 'Write', tool_input: { file_path: '/x' } }] },
+    ].map((l) => JSON.stringify(l)).join('\n');
+    setImmediate(() => {
+      // split mid-line: lines must be joined across chunks
+      child.stdout.emit('data', lines.slice(0, 50));
+      child.stdout.emit('data', lines.slice(50));
+      child.emit('close', 0);
+    });
+    return child;
+  };
+  const r = await createClaudeRunner({ cwd: '/x', spawnImpl }).run({ prompt: 'p', profile: 'analyze', onEvent: (e) => events.push(e) });
+  assert.equal(seen[seen.indexOf('--output-format') + 1], 'stream-json');
+  assert.ok(seen.includes('--verbose'));
+  assert.deepEqual(events.map((e) => [e.tool, e.sub]), [['Read', false], ['Bash', true]]);
+  assert.equal(r.text, 'xong');
+  assert.equal(r.sessionId, 's2');
+  assert.equal(r.costUsd, 0.7);
+  assert.equal(r.denials.length, 1);
+});

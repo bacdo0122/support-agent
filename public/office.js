@@ -113,6 +113,9 @@ export function createOffice(canvas, { onSelect, onView } = {}) {
   const view = { w: 0, h: 0, dpr: 1, scale: 1, ox: 0, oy: 0, fit: 1 };
   let sessions = [];
   let tasks = [];
+  let files = []; // case folders: {key, at: staff session key | 'director', urgent}
+  let approvals = 0; // things waiting for you outside sessions (the approval queue)
+  const filePos = new Map(); // key → {x, y, z, from, t0} folder flying between desks
   const actors = new Map();
   const deskOf = new Map();
   let hits = [];
@@ -750,13 +753,17 @@ export function createOffice(canvas, { onSelect, onView } = {}) {
         if (!a.leaving) Object.assign(a, { leaving: true, path: routeOut(a.room, { x: a.x, y: a.y }), sit: false, s: { ...a.s, status: 'idle' } });
       } else actors.delete(k);
     }
-    const taken = (room, i) => [...deskOf.values()].some((d) => d.room === room && d.i === i);
+    const reserved = sessions.filter((s) => s.desk).map((s) => s.desk);
+    const taken = (room, i) => reserved.some((r) => r.room === room && r.i === i) || [...deskOf.values()].some((d) => d.room === room && d.i === i);
     let lounge = 0;
     let stand = 0;
     for (const s of sessions) {
       const want = roomForSession(s, tasks);
       let d = deskOf.get(s.key);
-      if (!d || d.want !== want) {
+      if (s.desk) {
+        d = { room: s.desk.room, i: s.desk.i, want: s.desk.room };
+        deskOf.set(s.key, d);
+      } else if (!d || d.want !== want) {
         d = null;
         for (const room of [want, 'Chung']) {
           const i = DESKS[room].findIndex((_, j) => !taken(room, j));
@@ -768,10 +775,10 @@ export function createOffice(canvas, { onSelect, onView } = {}) {
         if (d) deskOf.set(s.key, d);
       }
       let target;
-      if (s.status === 'idle') target = LOUNGE_SPOTS[lounge++ % LOUNGE_SPOTS.length];
+      if (s.status === 'idle' && !s.desk) target = LOUNGE_SPOTS[lounge++ % LOUNGE_SPOTS.length];
       else if (d) target = { ...seatOf(DESKS[d.room][d.i]), sit: true };
       else target = { x: 10 + (stand++ % 8) * 0.8, y: 8.6 };
-      const room = d?.room ?? want;
+      const room = s.desk ? (s.app ?? 'Chung') : d?.room ?? want;
       const a = actors.get(s.key);
       if (!a) {
         // a new agent enters from the street door and walks to its desk; sessions appear in place
@@ -880,12 +887,13 @@ export function createOffice(canvas, { onSelect, onView } = {}) {
       });
     }
     labels.push({ kind: 'note', p: toScreen(iso(4.2, 14.4)), text: 'Phòng nghỉ', color: '#e7e9ee' });
-    labels.push({ kind: 'note', p: toScreen(iso(15.5, 14.6)), text: 'Phòng chung', color: APP.Chung.color });
+    labels.push({ kind: 'note', p: toScreen(iso(15.5, 14.6)), text: sessions.some((x) => x.staff) ? 'Sảnh nghiệp vụ' : 'Phòng chung', color: APP.Chung.color });
     labels.push({ kind: 'note', p: toScreen(iso(6, 20.6)), text: 'Căn tin', color: '#e7e9ee' });
     labels.push({ kind: 'note', p: toScreen(iso(14.6, 20.6)), text: 'Phòng giám đốc', color: '#d4a84b' });
 
     // the director (you): shows how many sessions wait for your approval
-    const waitingCount = sessions.filter((s) => s.status === 'waiting').length;
+    const waitingCount = sessions.filter((s) => s.status === 'waiting' && !s.staff).length + approvals;
+    drawFiles(list, t, labels);
     add(list, DIRECTOR.x + DIRECTOR.y + 0.02, () => person(iso(DIRECTOR.x, DIRECTOR.y), { shirt: '#2c3e66', seed: 'director', t, sitting: true, tie: true }));
     {
       const head = toScreen(iso(DIRECTOR.x, DIRECTOR.y, 70));
@@ -922,7 +930,7 @@ export function createOffice(canvas, { onSelect, onView } = {}) {
       const feet = toScreen(iso(a.x, a.y));
       if (!a.leaving) hits.push({ s, x0: feet.x - 16 * scale - 4, x1: feet.x + 16 * scale + 4, y0: head.y - 4, y1: feet.y + 6 });
       bodies.push({ x0: feet.x - 11 * scale, x1: feet.x + 11 * scale, y0: head.y - 2, y1: feet.y - (seated ? 14 * scale : 0) });
-      labels.push({ kind: 'session', p: head, s, t, action: !a.leaving && (s.status === 'waiting' || (s.status === 'working' && (showAction || isHover || isSel))) });
+      labels.push({ kind: 'session', p: head, s, t, action: !a.leaving && (s.status === 'waiting' || (s.status === 'working' && (showAction || isHover || isSel || s.staff))) });
     }
 
     list.sort((a, b) => a.d - b.d);
@@ -948,7 +956,7 @@ export function createOffice(canvas, { onSelect, onView } = {}) {
     // zoomed far out: only what needs you (sessions waiting for approval, and the director)
     const compact = cam.zoom < 0.65;
     for (const l of labels) {
-      if (compact && l.kind !== 'director' && !(l.kind === 'session' && l.s.status === 'waiting')) continue;
+      if (compact && l.kind !== 'director' && !(l.kind === 'session' && (l.s.status === 'waiting' || (l.s.say && Date.now() < l.s.say.until)))) continue;
       if (l.p.x < -20 || l.p.x > view.w + 20 || l.p.y < -20 || l.p.y > view.h + 60) continue; // its owner is off screen
       if (l.kind === 'session') sessionLabel(l);
       else if (l.kind === 'director') directorLabel(l);
@@ -1103,6 +1111,50 @@ export function createOffice(canvas, { onSelect, onView } = {}) {
     g.lineCap = 'butt';
   }
 
+  // Case folders: on the desk of the staff member working on them, piled on the director's desk when they need you,
+  // flying in an arc from one desk to the next when the work moves on.
+  function fileSpot(f, n) {
+    if (f.at === 'director') return { x: 16.8 + (n % 3) * 0.5, y: 17.45 + Math.floor(n / 3) * 0.05, z: 18 + Math.floor(n / 3) * 3.2 };
+    const d = deskOf.get(f.at);
+    if (!d) return null;
+    const desk = DESKS[d.room][d.i];
+    return { x: desk.x + 0.08 + (n % 2) * 0.06, y: desk.y + 0.12, z: 18 + n * 3.2 };
+  }
+  function drawFiles(list, t, labels) {
+    const live = new Set(files.map((f) => f.key));
+    for (const k of [...filePos.keys()]) if (!live.has(k)) filePos.delete(k);
+    const perSpot = new Map();
+    for (const f of files) {
+      const n = perSpot.get(f.at) ?? 0;
+      perSpot.set(f.at, n + 1);
+      const to = fileSpot(f, n);
+      if (!to) continue;
+      let p = filePos.get(f.key);
+      if (!p || reduceMotion) p = { x: to.x, y: to.y, z: to.z, from: null, at: f.at };
+      else if (p.at !== f.at) p = { ...p, from: { x: p.x, y: p.y, z: p.z }, t0: t, at: f.at };
+      let { x, y, z } = to;
+      if (p.from) {
+        const k = Math.min(1, (t - p.t0) / 1.2);
+        const e = k < 0.5 ? 2 * k * k : 1 - (-2 * k + 2) ** 2 / 2;
+        x = p.from.x + (to.x - p.from.x) * e;
+        y = p.from.y + (to.y - p.from.y) * e;
+        z = p.from.z + (to.z - p.from.z) * e + Math.sin(Math.PI * e) * 46;
+        if (k >= 1) p.from = null;
+      }
+      Object.assign(p, { x, y, z });
+      filePos.set(f.key, p);
+      const color = f.urgent ? '#e8735f' : '#f2c14e';
+      add(list, x + y + (p.from ? 2 : 0.6), () => {
+        box(x, y, 0.5, 0.36, 3, shade(color, 0.85), { z, top: color });
+        poly(quad(x + 0.03, y + 0.03, x + 0.2, y + 0.12, z + 3.1), shade(color, 0.75));
+        poly(quad(x + 0.08, y + 0.16, x + 0.44, y + 0.19, z + 3.1), 'rgba(255,255,255,0.8)');
+        poly(quad(x + 0.08, y + 0.24, x + 0.36, y + 0.27, z + 3.1), 'rgba(255,255,255,0.8)');
+      });
+      // key tag when zoomed in or while it flies
+      if (cam.zoom >= 1.3 || p.from) labels.push({ kind: 'note', p: toScreen(iso(x + 0.25, y + 0.18, z + 12)), text: `#${f.key.split('-').pop()}`, color: color });
+    }
+  }
+
   // Name tag (status dot, project, helpers), task key, and an action card for working/waiting sessions.
   function sessionLabel(l) {
     const s = l.s;
@@ -1112,7 +1164,11 @@ export function createOffice(canvas, { onSelect, onView } = {}) {
     const nameW = measure(name, F.name) + 30 + (helpers ? measure(helpers, F.small) + 10 : 0);
     const tagH = 24;
     let card = null;
-    if (l.action) {
+    const say = s.say && Date.now() < s.say.until ? s.say.text : null;
+    if (say) {
+      const str = fitText(say, F.act, 240);
+      card = { str, w: measure(str, F.act) + 46, h: 34, say: true, kind: 'chat' };
+    } else if (l.action) {
       const waiting = s.status === 'waiting';
       const raw = waiting ? `Chờ duyệt: ${s.waitingFor || 'cần bạn cho phép'}` : s.lastAction || s.prompt || 'Đang làm';
       const str = fitText(raw, F.act, 210);
@@ -1145,17 +1201,32 @@ export function createOffice(canvas, { onSelect, onView } = {}) {
       const bounce = card.waiting && !reduceMotion ? Math.abs(Math.sin(l.t * 3.5)) * 3 : 0;
       y -= card.h + 5 + bounce;
       const x = cx - card.w / 2;
-      const accent = card.waiting ? STATUS.waiting : STATUS.working;
-      roundRect(x, y, card.w, card.h, 9, card.waiting ? 'rgba(46,36,18,0.95)' : 'rgba(17,20,26,0.92)', accent, card.waiting ? 2 : 1.5);
-      roundRect(x + 7, y + 6, 22, 22, 6, card.waiting ? accent : 'rgba(53,179,122,0.18)');
-      icon(card.kind, x + 18, y + 17, card.waiting ? '#2a1d05' : accent);
-      text(card.str, x + 37, y + card.h / 2 + 0.5, F.act, '#ffffff');
+      if (card.say) {
+        // speech bubble with a tail towards the speaker
+        roundRect(x, y, card.w, card.h, 12, '#ffffff', '#d4a84b', 1.5);
+        g.fillStyle = '#ffffff';
+        g.beginPath();
+        g.moveTo(cx - 6, y + card.h - 1);
+        g.lineTo(cx, y + card.h + 7);
+        g.lineTo(cx + 6, y + card.h - 1);
+        g.closePath();
+        g.fill();
+        roundRect(x + 7, y + 6, 22, 22, 6, 'rgba(212,168,75,0.25)');
+        icon('agent', x + 18, y + 17, '#8a6418');
+        text(card.str, x + 37, y + card.h / 2 + 0.5, F.act, '#1d2026');
+      } else {
+        const accent = card.waiting ? STATUS.waiting : STATUS.working;
+        roundRect(x, y, card.w, card.h, 9, card.waiting ? 'rgba(46,36,18,0.95)' : 'rgba(17,20,26,0.92)', accent, card.waiting ? 2 : 1.5);
+        roundRect(x + 7, y + 6, 22, 22, 6, card.waiting ? accent : 'rgba(53,179,122,0.18)');
+        icon(card.kind, x + 18, y + 17, card.waiting ? '#2a1d05' : accent);
+        text(card.str, x + 37, y + card.h / 2 + 0.5, F.act, '#ffffff');
+      }
     }
   }
 
   function directorLabel(l) {
     const name = 'Giám đốc · bạn';
-    const msg = l.waiting ? `${l.waiting} phiên chờ bạn duyệt` : 'Mọi việc ổn';
+    const msg = l.waiting ? `${l.waiting} việc chờ bạn duyệt` : 'Mọi việc ổn';
     const nameW = measure(name, F.name) + 30;
     const msgW = measure(msg, F.small) + 20;
     const total = 24 + 4 + 22;
@@ -1279,6 +1350,8 @@ export function createOffice(canvas, { onSelect, onView } = {}) {
     update(next) {
       sessions = next.sessions.filter((s) => s.status !== 'ended');
       tasks = next.tasks;
+      files = next.files ?? [];
+      approvals = next.approvals ?? 0;
       if (selected && !sessions.some((s) => s.key === selected)) selected = null;
       assignSpots();
       kick();

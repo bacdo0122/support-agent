@@ -247,15 +247,18 @@ function showPopover(s, at) {
     else r.append(el('b', '', value));
     popover.append(r);
   };
-  row('Trạng thái', SESSION_LABEL[s.status]);
-  row('Máy', s.machine);
+  row('Trạng thái', s.staff && s.status === 'idle' ? 'Rảnh' : SESSION_LABEL[s.status]);
+  if (s.staff) {
+    row('Vai trò', s.desc);
+    row('Model', s.machine);
+  } else row('Máy', s.machine);
   row('Task', s.task ? taskLink(s.task) : null);
   row('Skill', s.skill ? '/' + s.skill : null);
   row(s.status === 'waiting' ? 'Chờ duyệt' : 'Việc gần nhất', s.status === 'waiting' ? s.waitingFor : s.lastAction);
   row('Yêu cầu', s.prompt);
   row('Thư mục', s.cwd);
-  row('Cập nhật', ago(s.updatedAt) + ' trước');
-  if (s.agent) {
+  if (s.updatedAt) row('Cập nhật', ago(s.updatedAt) + ' trước');
+  if (s.agent || (s.staff && s.task)) {
     const go = el('button', 'pop-go', 'Xem trong hàng đợi');
     go.type = 'button';
     go.addEventListener('click', () => document.getElementById(`appr-${s.task}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' }));
@@ -269,8 +272,24 @@ function showPopover(s, at) {
   popover.style.top = Math.max(8, Math.min(at.y - h / 2, wrap.height - h - 8)) + 'px';
 }
 
+// close: the × button, Esc, a click anywhere outside the card, or clicking the same person again
+const closePopover = () => {
+  if (popover.hidden) return;
+  showPopover(null);
+  office.deselect();
+};
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') closePopover();
+});
+document.addEventListener('pointerdown', (e) => {
+  if (!popover.hidden && !popover.contains(e.target) && e.target !== $('#office')) closePopover();
+}, true);
+
 const office = createOffice($('#office'), {
-  onSelect: (s, at) => showPopover(s, at),
+  onSelect: (s, at) => {
+    if (s && s.key === popKey && !popover.hidden) return closePopover();
+    showPopover(s, at);
+  },
   onView: ({ zoom }) => ($('#oz-level').textContent = `${Math.round(zoom * 100)}%`),
 });
 $('#oz-fit').addEventListener('click', () => office.fit());
@@ -284,9 +303,13 @@ $('#oz-shot').addEventListener('click', () => {
 });
 
 // One agent per approval-queue task on this machine, in the room of the task's app; it leaves when the task is done or skipped.
+// With the office on (lib/office.mjs) the queue is staff at fixed desks instead, and each task is a case folder moving
+// from desk to desk (officeStaff below).
 const APP_ROOMS = ['Solution', 'Quote', 'Lock'];
+let serverSettings = {};
 function pipelineAgents() {
   const agents = [];
+  if (serverSettings.office) return agents;
   for (const it of localPipeline()) {
     if (['done', 'skipped'].includes(it.state)) continue;
     let status = 'working';
@@ -294,7 +317,10 @@ function pipelineAgents() {
     let waitingFor = '';
     if (it.state === 'pending') [status, waitingFor] = ['waiting', it.note ? 'task không còn Todo, duyệt để phân tích' : 'duyệt phân tích'];
     else if (it.state === 'queued') lastAction = it.bossStatus?.state === 'moving' ? 'Chuyển status sang In Progress' : 'Chờ lượt phân tích';
-    else if (it.state === 'analyzing') lastAction = it.verify?.state === 'running' ? 'Đang kiểm chứng từng câu trả lời' : 'Đang chạy /analyze-boss-task';
+    else if (it.state === 'analyzing') {
+      const step = it.office?.find((s) => s.state === 'running');
+      lastAction = step ? `${step.name} đang làm` : it.verify?.state === 'running' ? 'Đang kiểm chứng từng câu trả lời' : 'Đang chạy /analyze-boss-task';
+    }
     else if (it.state === 'failed') [status, waitingFor] = ['waiting', `lỗi: ${it.error ?? ''}`];
     else if (it.comment?.state === 'posting') lastAction = 'Đang comment lên task';
     else if (it.devhub?.state === 'running') lastAction = 'Đang ghi DevHub';
@@ -311,8 +337,215 @@ function pipelineAgents() {
   return agents;
 }
 
+// ---- the office: staff with their own desk, case folders, handoff bubbles ----
+const STAFF = [
+  { role: 'clerk', name: 'Thư ký hồ sơ', model: 'code', desk: { room: 'Chung', i: 0 }, desc: 'Mở hồ sơ: task, comment, Crisp, ảnh đã đọc sẵn' },
+  { role: 'librarian', name: 'Thủ thư', model: 'sonnet', desk: { room: 'Chung', i: 1 }, desc: 'Chọn tiền lệ và bài học thật sự khớp, gợi ý điều cần kiểm trước' },
+  { role: 'receptionist', name: 'Lễ tân', model: 'haiku', desk: { room: 'Chung', i: 2 }, desc: 'Phân loại task, đánh dấu task liên quan nhiều app, thông tin còn thiếu' },
+  { role: 'reviewer', name: 'Kiểm định', model: 'opus', desk: { room: 'Chung', i: 3 }, desc: 'Tự kiểm từng khẳng định của chuyên gia, sửa hoặc đánh dấu chưa chắc; sai thì trả hồ sơ cho chuyên gia làm lại 1 lần' },
+  { role: 'editor', name: 'Biên tập', model: 'sonnet', desk: { room: 'Chung', i: 4 }, desc: 'Viết comment 4 mục cho CS từ kết luận đã kiểm định' },
+  ...APP_ROOMS.map((app) => ({ role: 'analyst', app, name: `Chuyên gia ${app}`, model: 'opus', desk: { room: app, i: 0 }, desc: `Phân tích task ${app} (/analyze-boss-task + gói kiến thức ${app}); trả lời câu hỏi chéo từ app khác; thử fix, hỏi lại, ghi DevHub` })),
+];
+// the desk a step is worked at: specialist steps at the app's specialist, the rest at their own role
+const deskRole = (st, it) => (['analyst', 'redo', 'followup'].includes(st.role) ? staffKey({ role: 'analyst', app: appOf(it) })
+  : st.role === 'consult' ? staffKey({ role: 'analyst', app: st.app }) : st.role === 'review2' ? staffKey({ role: 'reviewer' }) : staffKey({ role: st.role }));
+const staffKey = (st) => `staff|${st.role}${st.app ? '|' + st.app : ''}`;
+const appOf = (it) => (APP_ROOMS.includes(it.app) ? it.app : APP_ROOMS.includes(it.analysis?.app) ? it.analysis.app : 'Solution');
+const NEEDS_YOU = (it) => it.state === 'pending' || it.state === 'failed' || (it.state === 'review' && !busyAfterReview(it));
+const busyAfterReview = (it) => it.comment?.state === 'posting' || it.devhub?.state === 'running' || it.asking || it.trial?.state === 'running'
+  || ['enabling', 'checking', 'reverting'].includes(it.devhub?.live?.state);
+
+// ?demo=1: fake case folders going through the staff, only drawn in the office (nothing runs, nothing is sent).
+const DEMO = new URLSearchParams(location.search).has('demo');
+// [role, seconds, note, to, app of a consult]
+const DEMO_FLOW = {
+  Solution: [['clerk', 2, '3 comment, 41 tin Crisp, 2 ảnh', 'Lễ tân'], ['receptionist', 2, 'bug', 'Thủ thư'], ['librarian', 4, '3/12 tiền lệ · 5/40 bài học', 'Chuyên gia Solution'],
+    ['analyst', 7, 'bug · tin cậy high', 'Kiểm định'], ['reviewer', 5, 'fix · 6/7 khẳng định đúng · sửa solution', 'Biên tập'], ['editor', 3, 'đúng template', 'Giám đốc']],
+  Lock: [['clerk', 2, '1 comment, 12 tin Crisp', 'Lễ tân'], ['receptionist', 2, 'bug', 'Thủ thư'], ['librarian', 3, '2/9 tiền lệ', 'Chuyên gia Lock'],
+    ['analyst', 6, 'bug · tin cậy high', 'Kiểm định'], ['reviewer', 4, 'wrong · 2/5 khẳng định đúng', 'Chuyên gia Lock'], ['redo', 5, 'làm lại · tin cậy medium', 'Kiểm định'],
+    ['review2', 4, 'ok · 5/5 khẳng định đúng', 'Biên tập'], ['editor', 3, 'đúng template', 'Giám đốc']],
+  Quote: [['clerk', 2, '2 comment, 30 tin Crisp', 'Lễ tân'], ['receptionist', 2, 'bug · liên app Quote+Solution', 'Thủ thư'], ['librarian', 3, '4/12 tiền lệ', 'Chuyên gia Quote'],
+    ['analyst', 6, 'bug · hỏi Solution', 'Chuyên gia Solution'], ['consult', 5, 'trả lời high: giá CP không đẩy sang quote', 'Chuyên gia Quote', 'Solution'],
+    ['followup', 3, 'cập nhật · tin cậy high', 'Kiểm định'], ['reviewer', 4, 'ok · 6/6 khẳng định đúng', 'Biên tập'], ['editor', 3, 'đúng template', 'Giám đốc']],
+};
+const DEMO_TASKS = [
+  { key: 'SBCB2BBS-9001', app: 'Solution', title: 'Demo: giá VP không áp ở checkout', priority: 'Urgent' },
+  { key: 'SBCB2BBS-9002', app: 'Lock', title: 'Demo: trang không bị khoá với khách chưa login', priority: 'Normal' },
+  { key: 'SBCB2BBS-9003', app: 'Quote', title: 'Demo: email báo giá gửi sai địa chỉ', priority: 'Normal' },
+];
+const DEMO_ACTIONS = {
+  analyst: ['Chạy lệnh: git -C monorepo fetch origin', 'Tìm: appliedPL', 'Đọc price.ts', 'Chạy lệnh: git -C monorepo show origin/master:apps/extensions/…/CpProduct.ts', 'BOSS-SBC: search_tasks', 'chrome-devtools: navigate_page https://demo-store.myshopify.com/products/…', 'chrome-devtools: take_snapshot', '↳ Đọc checkout.service.ts', 'Đọc themeConfig.ts'],
+  consult: ['Chạy lệnh: git -C monorepo grep "draftOrder" origin/master', 'Đọc draft-order.service.ts', 'Tìm: quotePricing'],
+  reviewer: ['Đọc price.ts', 'Chạy lệnh: git -C monorepo log -5 --oneline origin/master', 'BOSS-SBC: read_task SBCB2BBS-5562', 'chrome-devtools: navigate_page https://demo-store.myshopify.com/cart'],
+};
+DEMO_ACTIONS.redo = DEMO_ACTIONS.analyst;
+DEMO_ACTIONS.followup = DEMO_ACTIONS.analyst;
+DEMO_ACTIONS.review2 = DEMO_ACTIONS.reviewer;
+function demoLive(role, sec, startedAt) {
+  const acts = DEMO_ACTIONS[role];
+  if (!acts) return {};
+  const n = Math.floor(sec * 1.5) + 1;
+  const recent = Array.from({ length: Math.min(n, 10) }, (_, i) => ({
+    at: new Date(Date.parse(startedAt) + ((n - 1 - i) / 1.5) * 1000).toISOString(), text: acts[(n - 1 - i) % acts.length],
+  }));
+  return { tools: n, recent };
+}
+function demoItems() {
+  if (!DEMO) return [];
+  const t0 = (demoItems.start ??= Date.now());
+  return DEMO_TASKS.map((task, n) => {
+    const flow = DEMO_FLOW[task.app];
+    const cycle = flow.reduce((a, x) => a + x[1], 0) + 8; // + time on your desk
+    const el = ((Date.now() - t0) / 1000 - n * 7 + cycle * 3) % cycle;
+    let acc = 0;
+    const office = flow.map(([role, dur, note, to, app]) => {
+      const start = acc;
+      acc += dur;
+      const state = el >= acc ? 'done' : el >= start ? 'running' : 'waiting';
+      const startedAt = new Date(Date.now() - (el - start) * 1000).toISOString();
+      return { id: app ? `${role}:${app}` : role, role, app, name: role, state, note: state === 'done' ? note : null, to,
+        startedAt, seconds: state === 'done' ? dur : null, ...(state === 'running' ? demoLive(role, el - start, startedAt) : {}) };
+    });
+    return { ...task, state: el >= acc ? 'review' : 'analyzing', office, updatedAt: new Date().toISOString() };
+  });
+}
+
+function officeStaff() {
+  if (!serverSettings.office && !DEMO) return { staff: [], files: [], approvals: 0 };
+  const items = [...localPipeline(), ...demoItems()].filter((it) => !['done', 'skipped'].includes(it.state));
+  const work = new Map(); // staff key → [{it, text}]
+  const say = new Map(); // staff key → {text, until}
+  const files = [];
+  const give = (key, it, text, st = null) => work.set(key, [...(work.get(key) ?? []), { it, text, st }]);
+  const analystKey = (it) => staffKey({ role: 'analyst', app: appOf(it) });
+  for (const it of items) {
+    let at = 'director';
+    const running = it.office?.find((x) => x.state === 'running');
+    if (it.state === 'queued' || (it.state === 'analyzing' && !running)) {
+      at = staffKey({ role: 'clerk' });
+      give(at, it, it.bossStatus?.state === 'moving' ? 'chuyển status sang In Progress' : 'xếp hồ sơ chờ phân tích');
+    } else if (running) {
+      at = deskRole(running, it);
+      give(at, it, { clerk: 'mở hồ sơ', receptionist: 'phân loại', librarian: 'tìm tiền lệ', analyst: 'phân tích', consult: `trả lời câu hỏi của chuyên gia ${appOf(it)}`,
+        followup: 'cập nhật theo câu trả lời', reviewer: 'kiểm định', redo: 'làm lại theo kiểm định', review2: 'kiểm định lần 2', editor: 'viết comment' }[running.role] ?? 'đang làm', running);
+    } else if (it.state === 'review' && busyAfterReview(it)) {
+      at = it.comment?.state === 'posting' ? staffKey({ role: 'editor' }) : analystKey(it);
+      give(at, it, it.comment?.state === 'posting' ? 'đang đăng comment lên task' : it.devhub?.state === 'running' ? 'đang ghi DevHub'
+        : it.asking ? 'trả lời câu hỏi của bạn' : it.trial?.state === 'running' ? 'thử fix trên store (không lưu gì)' : 'bật code và kiểm tra store');
+    }
+    files.push({ key: it.key, at, urgent: it.priority === 'Urgent' });
+    // the last handoff in the last 8 s: the one who finished says it to the next
+    for (const st of it.office ?? []) {
+      if (st.state !== 'done' || !st.startedAt) continue;
+      const end = Date.parse(st.startedAt) + (st.seconds ?? 0) * 1000;
+      if (Date.now() - end > 8000) continue;
+      say.set(deskRole(st, it), { text: `#${it.key.split('-').pop()} → ${st.to ?? 'tiếp'}: ${st.note ?? 'xong'}`, until: end + 8000 });
+    }
+  }
+  const staff = STAFF.map((st) => {
+    const key = staffKey(st);
+    const w = work.get(key) ?? [];
+    return {
+      id: key, key, staff: st.role, app: st.app ?? 'Chung', desk: st.desk, project: st.name, machine: st.model, desc: st.desc,
+      status: w.length ? 'working' : 'idle', task: w[0]?.it.key ?? null,
+      // the map shows the real tool call when there is one, else the job
+      lastAction: w[0] ? (w[0].st?.recent?.[0]?.text ?? w[0].text) + (w.length > 1 ? ` (+${w.length - 1})` : '') : '',
+      job: w[0]?.text ?? '', live: w[0]?.st ? { startedAt: w[0].st.startedAt, tools: w[0].st.tools ?? 0, recent: w[0].st.recent ?? [] } : null,
+      prompt: w.length > 1 ? `${w.length} hồ sơ: ${w.map((x) => x.it.key).join(', ')}` : w[0]?.it.title ?? '', waitingFor: '',
+      cwd: '', skill: null, subagents: 0, updatedAt: w[0]?.it.updatedAt ?? null, say: say.get(key) ?? null, files: w.length,
+    };
+  });
+  return { staff, files, approvals: items.filter(NEEDS_YOU).length };
+}
+
+// Right column card: what each staff member is doing now, and everything waiting for your permission or decision
+// (the office's escalations and approvals, plus Claude Code sessions asking for a permission).
+const teamOpen = new Set(); // staff whose action log you opened
+const elapsed = (iso) => {
+  const s = Math.max(0, Math.round((Date.now() - Date.parse(iso)) / 1000));
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+};
+let lastStaff = [];
+setInterval(() => {
+  if (lastStaff.some((s) => s.status === 'working')) renderTeam(lastStaff); // the running clocks
+}, 1000);
+function renderTeam(staff) {
+  lastStaff = staff;
+  const active = localPipeline().filter((i) => !['skipped', 'done'].includes(i.state));
+  const asks = decisions(active).flatMap(({ it, why }) => why.map(([kind, text]) => ({ key: it.key, title: it.title, kind, text, go: `appr-${it.key}` })));
+  for (const s of allSessions()) {
+    if (s.status === 'waiting') asks.push({ key: s.task ?? '', title: `${s.project}${s.machine ? ' · ' + s.machine : ''}`, kind: 'Cấp quyền', text: s.waitingFor || 'chờ bạn cho phép', session: s });
+  }
+  const badge = $('#n-ask');
+  badge.hidden = !asks.length;
+  badge.textContent = asks.length;
+  const askBox = $('#team-ask');
+  if (!asks.length) askBox.replaceChildren(el('p', 'muted', 'Không có việc nào chờ bạn.'));
+  else {
+    askBox.replaceChildren(...asks.map((a) => {
+      const row = el('button', 'team-ask-row');
+      row.type = 'button';
+      row.append(el('span', `decide-chip${a.kind === 'Duyệt' ? '' : ' warn'}`, a.kind), el('span', 'team-ask-key', a.key), el('span', 'team-ask-title', a.title ?? ''), el('span', 'team-ask-text', a.text));
+      row.addEventListener('click', () => {
+        if (a.go) document.getElementById(a.go)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        else alertLine(`${a.title}: trả lời trong cửa sổ Claude Code của phiên đó`);
+      });
+      return row;
+    }));
+  }
+  const list = $('#team-staff');
+  if (!staff.length) {
+    list.replaceChildren(el('li', 'muted', 'Văn phòng nhiều vai đang tắt (OFFICE=0).'));
+    $('#team-note').textContent = '';
+    return;
+  }
+  const busy = staff.filter((s) => s.status === 'working').length;
+  $('#team-note').textContent = `${busy}/${staff.length} đang làm`;
+  list.replaceChildren(...[...staff].sort((a, b) => (b.status === 'working') - (a.status === 'working')).map((s) => {
+    const li = el('li', `team-member ${s.status}`);
+    const head = el('div', 'team-head');
+    head.append(el('span', `dot ${s.status}`), el('span', 'team-name', s.project), el('span', 'team-model', s.machine));
+    if (s.files > 1) head.append(el('span', 'team-files', `${s.files} hồ sơ`));
+    li.append(head);
+    if (s.status === 'working') {
+      const what = el('div', 'team-what');
+      if (s.task) what.append(taskLink(s.task), ' ');
+      what.append(s.job || 'đang làm');
+      if (s.live?.startedAt) what.append(el('span', 'team-meta', ` · ${elapsed(s.live.startedAt)}${s.live.tools ? ` · ${s.live.tools} tool` : ''}`));
+      li.append(what);
+      const recent = s.live?.recent ?? [];
+      if (recent.length) {
+        li.append(el('div', 'team-now', recent[0].text));
+        if (recent.length > 1) {
+          const det = el('details', 'team-log');
+          det.open = teamOpen.has(s.key);
+          det.addEventListener('toggle', () => (det.open ? teamOpen.add(s.key) : teamOpen.delete(s.key)));
+          det.append(el('summary', '', `${recent.length} việc gần nhất`));
+          const ol = el('ol', '');
+          for (const r of recent) {
+            const row = el('li', '');
+            row.append(el('span', 'team-ago', new Date(r.at).toLocaleTimeString('vi-VN')), r.text);
+            ol.append(row);
+          }
+          det.append(ol);
+          li.append(det);
+        }
+      }
+    } else li.append(el('div', 'team-what muted', s.say && Date.now() < s.say.until ? s.say.text : 'Rảnh'));
+    if (s.task) {
+      li.classList.add('clickable');
+      li.addEventListener('click', (e) => {
+        if (e.target.closest('a')) return;
+        document.getElementById(`appr-${s.task}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      });
+    }
+    return li;
+  }));
+}
+
 function renderOffice() {
   const agents = pipelineAgents();
+  const desk = officeStaff();
   const byTask = new Map(agents.map((a) => [a.task, a]));
   // a Claude session reporting through hooks for the same task is that agent: show its live action, not a second person
   const sessions = [];
@@ -322,10 +555,15 @@ function renderOffice() {
       if (a.status === 'working' && s.lastAction) a.lastAction = s.lastAction;
     } else sessions.push(s);
   }
-  office.update({ sessions: [...sessions, ...agents], tasks: boss()?.tasks ?? [] });
+  office.update({ sessions: [...sessions, ...agents, ...desk.staff], tasks: boss()?.tasks ?? [], files: desk.files, approvals: desk.approvals });
+  renderTeam(desk.staff);
+  // repaint once the handoff bubbles expire
+  clearTimeout(renderOffice.timer);
+  if (DEMO) renderOffice.timer = setTimeout(renderOffice, 500);
+  else if (desk.staff.some((x) => x.say)) renderOffice.timer = setTimeout(renderOffice, 8200);
   if (popKey) {
     const s = allSessions().find((x) => x.key === popKey);
-    if (!s && !pipelineAgents().some((x) => x.key === popKey)) showPopover(null);
+    if (!s && !pipelineAgents().some((x) => x.key === popKey) && !popKey.startsWith('staff|')) showPopover(null);
     else if (s?.status === 'ended') showPopover(null);
   }
 }
@@ -467,6 +705,7 @@ function approvalCard(it) {
   } else if (it.state === 'queued' || it.state === 'analyzing') {
     if (it.startedAt) card.append(el('div', 'muted', `Bắt đầu ${clock(it.startedAt)} · thường mất 5–15 phút`));
     if (it.verify?.state === 'running') card.append(el('div', 'muted', 'Đã soạn câu trả lời, đang kiểm chứng lại từng câu bằng một phiên độc lập…'));
+    if (it.office) card.append(officeBlock(it));
     actions.append(btn('Huỷ', '', () => act(`/${it.key}/cancel`)));
   } else if (it.state === 'failed') {
     card.append(el('div', 'appr-err', it.error ?? 'Lỗi'));
@@ -483,6 +722,7 @@ function approvalCard(it) {
       section('Cần xác minh', (a.needs ?? []).join(' · ')),
     ]) if (s) card.append(s);
     if (a.questions?.length) card.append(questionsBlock(it, a));
+    if (it.office) card.append(officeBlock(it));
     const probe = denialsBlock(it.denials, it.images, it.prefetch);
     if (probe) card.append(probe);
 
@@ -842,6 +1082,49 @@ function trialBlock(it, a, currentCode) {
 }
 
 // What the session could not do (refused tool calls) and the task images the app downloaded for it.
+// The staff who worked on the task (lib/office.mjs) and what the reviewer did not confirm.
+const STEP_STATE = { waiting: ['muted', 'chờ'], running: ['muted', 'đang làm…'], done: ['appr-ok', 'xong'], skipped: ['muted', 'bỏ qua'], failed: ['appr-err', 'lỗi'] };
+const REVIEW_VERDICT = { ok: ['appr-ok', 'Kiểm định: đúng'], fix: ['appr-warn', 'Kiểm định: đã sửa'], wrong: ['appr-err', 'Kiểm định: sai/thiếu căn cứ, cần bạn xem kỹ'], unchecked: ['appr-err', 'Chưa kiểm định được'] };
+const CLAIM_VERDICT = { corrected: 'đã sửa', unsure: 'chưa chắc', wrong: 'sai' };
+function officeBlock(it) {
+  const box = el('div', 'appr-block appr-office');
+  box.append(el('div', 'appr-block-head', 'Phòng ban xử lý'));
+  for (const s of it.office) {
+    const [cls, label] = STEP_STATE[s.state] ?? ['muted', s.state];
+    const row = el('div', 'office-step');
+    row.append(el('span', 'office-role', s.name), el('span', 'office-model', s.model), el('span', cls, label),
+      el('span', 'muted', [s.note, s.seconds != null && `${s.seconds}s`, s.costUsd != null && `$${Number(s.costUsd).toFixed(2)}`].filter(Boolean).join(' · ')));
+    box.append(row);
+  }
+  const r = it.analysis?.review;
+  if (r) {
+    const [cls, label] = REVIEW_VERDICT[r.verdict] ?? ['muted', r.verdict];
+    box.append(el('div', cls, label + (r.changed?.length ? ` (${r.changed.join(', ')})` : '')));
+    const bad = (r.claims ?? []).filter((c) => c.verdict !== 'confirmed');
+    if (bad.length) {
+      const ul = el('ul', 'office-claims');
+      for (const c of bad) {
+        const li = el('li', '', `[${CLAIM_VERDICT[c.verdict] ?? c.verdict}] ${c.claim}`);
+        if (c.fix) li.append(el('div', 'muted', `→ ${c.fix}`));
+        if (c.evidence) li.append(el('div', 'qa-ev', `Căn cứ: ${c.evidence}`));
+        ul.append(li);
+      }
+      box.append(ul);
+    }
+  }
+  const intake = it.analysis?.intake;
+  if (intake) box.append(el('div', 'appr-muted', `Lễ tân: ${intake.type ?? '?'} · ${(intake.apps ?? []).join(' + ') || it.app}${intake.crossApp ? ` · liên app (${intake.crossWhy ?? ''})` : ''}${intake.summary ? ` · ${intake.summary}` : ''}`));
+  for (const c of it.analysis?.consults ?? []) {
+    const q = el('div', 'office-consult');
+    q.append(el('div', '', `Hỏi chuyên gia ${c.app}: ${c.question}`), el('div', 'muted', `→ (${c.confidence ?? '?'}) ${c.answer}`));
+    if (c.evidence) q.append(el('div', 'qa-ev', `Căn cứ: ${c.evidence}`));
+    box.append(q);
+  }
+  for (const e of it.escalations ?? []) box.append(el('div', 'appr-warn', `Cần bạn quyết · ${ESC_KIND[e.kind] ?? e.kind}: ${e.text}`));
+  if (it.caseDir) box.append(el('div', 'appr-muted', `Hồ sơ: ${it.caseDir}`));
+  return box;
+}
+
 function denialsBlock(denials, images, prefetch) {
   const n = denials?.length ?? 0;
   if (!n && !images && !prefetch) return null;
@@ -897,9 +1180,50 @@ function chatBlock(it) {
   return box;
 }
 
+// Everything that waits for you, in one list: approvals, errors, and what the office escalated (lib/office.mjs).
+const ESC_KIND = { budget: 'Ngân sách', 'cross-app': 'Liên app', review: 'Kiểm định', 'needs-info': 'Thiếu thông tin', failed: 'Lỗi' };
+function decisions(active) {
+  const out = [];
+  for (const it of active) {
+    const why = [];
+    if (it.state === 'pending') why.push(['Duyệt', 'chạy phân tích']);
+    else if (it.state === 'failed') why.push(['Lỗi', it.error ?? 'phân tích lỗi']);
+    else if (it.state === 'review') {
+      if (it.comment?.state === 'failed') why.push(['Lỗi', `gửi comment: ${it.comment.error ?? ''}`]);
+      else if (!['posted', 'posting'].includes(it.comment?.state)) why.push(['Duyệt', 'solution và comment']);
+      if (it.devhub?.state === 'written' && !it.devhub.live) why.push(['Duyệt', 'bật code DevHub (đang comment)']);
+      for (const e of it.escalations ?? []) why.push([ESC_KIND[e.kind] ?? e.kind, e.text]);
+    }
+    if (why.length) out.push({ it, why });
+  }
+  return out;
+}
+function renderDecisions(active) {
+  const box = $('#appr-decide');
+  const list = decisions(active);
+  box.hidden = !list.length;
+  if (!list.length) return box.replaceChildren();
+  box.replaceChildren(el('div', 'appr-block-head', `Cần bạn quyết (${list.length})`));
+  for (const { it, why } of list) {
+    const row = el('button', 'decide-row');
+    row.type = 'button';
+    row.addEventListener('click', () => document.getElementById(`appr-${it.key}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' }));
+    row.append(el('span', 'decide-key', it.key), el('span', 'decide-title', it.title ?? ''));
+    const chips = el('span', 'decide-why');
+    for (const [k, t] of why) {
+      const c = el('span', `decide-chip${k === 'Duyệt' ? '' : ' warn'}`, k);
+      c.title = t;
+      chips.append(c, el('span', 'decide-text', t));
+    }
+    row.append(chips);
+    box.append(row);
+  }
+}
+
 function renderApprovals(force = false) {
   const all = localPipeline();
   const active = all.filter((i) => !['skipped', 'done'].includes(i.state));
+  renderDecisions(active);
   $('#appr-panel').hidden = !active.length;
   const n = (st) => active.filter((i) => i.state === st).length;
   $('#appr-note').textContent = [n('pending') && `${n('pending')} chờ duyệt phân tích`, n('analyzing') + n('queued') && `${n('analyzing') + n('queued')} đang phân tích`, n('review') && `${n('review')} chờ duyệt solution`].filter(Boolean).join(' · ');
@@ -1035,6 +1359,7 @@ try {
 // Auto-analysis of new tasks assigned to you (this machine's server only)
 let autoOn = null;
 function renderAuto(s) {
+  if (s && typeof s === 'object') serverSettings = s;
   if (typeof s?.autoAnalyze !== 'boolean') return;
   autoOn = s.autoAnalyze;
   const b = $('#btn-auto');

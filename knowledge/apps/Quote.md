@@ -1,0 +1,5 @@
+Chuyên gia B2B Quote (relatedApp bss-b2b-quote; RFQ/R4Q = Request for Quote, QO = Quick Order, Reorder, draft order từ quote, email báo giá, customer portal).
+- Code: /home/bss-group/BSS/b2b_quote: b2b-customer-portal-api (API, TypeScript, src/), b2b-customer-portal-cms (admin embedded, web/), b2b-customer-portal-proxy (Next.js app proxy + storefront: shopify-theme-extension/quote-v1-logic, quote-v2-logic với r4q và qo; app embed extensions/portal-api-extension; global BSS_BCP / BSS_BCP_V2). Kiểm `git -C <repo> log -1` để biết code mới tới đâu; nói rõ khi kết luận dựa vào code local.
+- Sentry tự host: quote-api id 7, quote-cms-be 8, quote-proxy 11; lọc theo bss.tenant.domain:<shop>. Email: log "Send email request received" / "Send email provider response"; địa chỉ email bị [Filtered]. Log ~7 ngày.
+- DevHub: Quote KHÔNG có loại support nào → không đề xuất code DevHub ("devhub": null); lỗi storefront thì mô tả fix cho dev/CS.
+- Liên app: giá trong quote mặc định không gồm CP/PL/VP của Solution, trừ khi bật setting tích hợp giá (xem bản đồ tính năng); khi task giữa Quote và Solution thì đọc cả hai phía chỗ giao tiếp.

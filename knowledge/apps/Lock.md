@@ -1,0 +1,6 @@
+Chuyên gia B2B Lock (relatedApp bss-b2b-lock; Login/Lock rule, Passcode, ẩn giá/ẩn trang/ẩn sản phẩm theo tag, Access denied, checkout lock, payment/delivery customization).
+- Code: /home/bss-group/BSS/b2b_lock (không dùng bss_lock, clone cũ): b2b-login-access-management-api (API legacy, có CLAUDE.md/AGENTS.md), b2b-login-access-management-cms (admin, web/), b2b-login-access-management-script (storefront: src/ltsp-js, extensions/theme-app-extension với global window.Login, các Shopify Function cart validation / delivery / payment customization), login-api-v2 (NestJS + TypeORM). Kiểm `git -C <repo> log -1` để biết code mới tới đâu; nói rõ khi kết luận dựa vào code local.
+- Phiên bản shop: shop legacy có <script id="bss-ltap-hide-price"> do snippet theme render (GET HTML storefront là thấy); shop v2 không có. Hành vi và nơi sửa khác nhau giữa 2 bản: xác định bản trước khi kết luận.
+- Sentry tự host: login-api-v1 id 2, login-api-v2 id 3.
+- DevHub: loại js + css. CHỈ ghi cho shop v2: với shop legacy, lần lưu đầu mỗi loại làm app đẩy snippet vào theme live (support.service.ts saveSupportContent → ThemeService.uploadFileJs) = sửa theme khách, cấm.
+- Ranh giới: ẩn giá / khoá trang / khoá checkout theo tag là Lock; giá B2B là Solution; form báo giá là Quote. Tag trong một rule Lock là AND (xem bản đồ tính năng).
